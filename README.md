@@ -244,7 +244,7 @@ All via environment variables.
 | `ANCHORD_EXT_MAC`            | no       | sha256(project)[:4] prefixed `02:42:` | Override only if you must |
 | `ANCHORD_EXT_IFACE`          | no       | `anchord-ext`      | macvlan child interface name |
 | `ANCHORD_POLL_INTERVAL`      | no       | `30s`              | Safety-net reconcile cadence |
-| `ANCHORD_DHCP_BACKOFF_MAX`   | no       | `5m`               | Max backoff between dhclient retries |
+| `ANCHORD_DHCP_BACKOFF_MAX`   | no       | `5m`               | Max backoff between DHCP-client retries on protocol errors |
 | `DOCKER_HOST`                | no       | unix socket        | Set to `tcp://docker-proxy:2375` for socket-proxy mode |
 
 ### Service-anchor mode
@@ -295,8 +295,6 @@ the release-gate contract.
 - **One network-anchor per Compose project** — the design assumes per-project
   scoping. Running multiple in the same project will race on nftables
   tables.
-- **dhclient is shelled out** (not native Go DHCP). v0.1 trade-off; renewal
-  hooks and lease persistence are battle-tested in dhclient.
 
 ## License
 

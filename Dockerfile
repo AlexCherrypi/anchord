@@ -20,12 +20,13 @@ RUN go build \
     ./cmd/anchord
 
 # ---- runtime stage ----------------------------------------------------------
-# We need dhclient + conntrack tools at runtime, so we can't go full
-# distroless. Alpine + the two packages weighs ~12 MB.
+# DHCP is now pure-Go (github.com/insomniacslk/dhcp), so dhclient is
+# no longer a runtime dependency. We still need conntrack-tools (for
+# flushing stale entries on backend IP changes) and nftables/iproute2
+# for diagnostics, so the runtime is Alpine rather than distroless.
 FROM alpine:3.19
 
 RUN apk add --no-cache \
-        dhclient \
         conntrack-tools \
         iproute2 \
         nftables \

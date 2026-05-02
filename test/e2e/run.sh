@@ -430,9 +430,11 @@ phase2_s3() {
 # removal (which is the observable side-effect of nat.Teardown +
 # dhcp.removeLink running on SIGTERM).
 #
-# Known gap: SPEC S-6 also requires a DHCPRELEASE on shutdown. anchord
-# kills dhclient via context cancellation (SIGKILL), so no release is
-# sent. Tracked separately; intentionally not asserted here yet.
+# Note: SPEC S-6 also requires a DHCPRELEASE on shutdown. anchord's
+# pure-Go DHCP client now sends one in its deferred cleanup before the
+# IP is removed from the iface. We don't actively tcpdump for it here
+# (would inflate harness complexity for low payoff), but the v4
+# release is no longer a known gap.
 phase2_teardown() {
     local project=$1
     local anchord="${project}-anchord-1"
@@ -534,7 +536,7 @@ cat >&2 <<'BANNER'
 
 NOTE: When running inside Docker (especially Docker Desktop on Windows
 or macOS), L2 broadcasts from a macvlan child onto a Docker bridge are
-NOT forwarded reliably to peer veth endpoints. dhclient's DHCPDISCOVER
+NOT forwarded reliably to peer veth endpoints. anchord's DHCPDISCOVER
 will leave anchord-ext but never reach the dnsmasq container's eth0,
 so the "anchord-ext has IPv4 from 10.99.0.0/24" assertion fails here.
 

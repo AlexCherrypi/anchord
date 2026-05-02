@@ -2,77 +2,54 @@ package dhcp
 
 import (
 	"context"
-	"os"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
 // Tests in this file deliberately avoid the netlink-bound surface
-// (ensureLink, removeLink, watchIP, watchLinkUsable, the dhclient
-// subprocess) — those are exercised end-to-end by test/e2e, which
-// runs against a real container with NET_ADMIN. Here we cover the
-// pure logic that doesn't need a netlink socket: the per-family
-// dhclient.conf generator and the backoff helper.
+// (ensureLink, removeLink, watchIP, watchLinkUsable, the DHCP client
+// I/O) — those are exercised end-to-end by test/e2e, which runs
+// against a real container with NET_ADMIN. Here we cover the pure
+// helpers that don't need a netlink socket.
 
-func TestWriteDhclientConf_V4(t *testing.T) {
-	s := &Supervisor{hostname: "mailcow"}
-
-	path, cleanup, err := s.writeDhclientConf(4)
+func TestRenewalInterval_UsesT1(t *testing.T) {
+	ack, err := dhcpv4.New(dhcpv4.WithLeaseTime(3600), dhcpv4.WithGeneric(dhcpv4.OptionRenewTimeValue, encodeUint32(900)))
 	if err != nil {
-		t.Fatalf("writeDhclientConf(4): %v", err)
+		t.Fatalf("build ack: %v", err)
 	}
-	defer cleanup()
-
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read conf: %v", err)
-	}
-	got := string(body)
-	if !strings.Contains(got, `send host-name "mailcow";`) {
-		t.Errorf("v4 conf missing host-name option: %q", got)
-	}
-	if strings.Contains(got, "dhcp6") {
-		t.Errorf("v4 conf must not contain v6 options: %q", got)
+	got := renewalInterval(ack)
+	want := 15 * time.Minute
+	if got != want {
+		t.Errorf("renewalInterval with explicit T1=900s: got %s, want %s", got, want)
 	}
 }
 
-func TestWriteDhclientConf_V6(t *testing.T) {
-	s := &Supervisor{hostname: "mailcow"}
-
-	path, cleanup, err := s.writeDhclientConf(6)
+func TestRenewalInterval_FallsBackToHalfLease(t *testing.T) {
+	// Lease=1h, no T1 in the packet → expect 30m.
+	ack, err := dhcpv4.New(dhcpv4.WithLeaseTime(3600))
 	if err != nil {
-		t.Fatalf("writeDhclientConf(6): %v", err)
+		t.Fatalf("build ack: %v", err)
 	}
-	defer cleanup()
-
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read conf: %v", err)
-	}
-	got := string(body)
-	// RFC 4704 Client-FQDN — flags=0 ("server decides"), then hostname.
-	if !strings.Contains(got, `send dhcp6.client-fqdn "0 mailcow";`) {
-		t.Errorf("v6 conf missing client-fqdn option: %q", got)
-	}
-	if strings.Contains(got, "host-name") {
-		t.Errorf("v6 conf must not contain v4 host-name option: %q", got)
+	got := renewalInterval(ack)
+	want := 30 * time.Minute
+	if got != want {
+		t.Errorf("renewalInterval without T1, lease=1h: got %s, want %s", got, want)
 	}
 }
 
-func TestWriteDhclientConf_Cleanup(t *testing.T) {
-	s := &Supervisor{hostname: "mailcow"}
-
-	path, cleanup, err := s.writeDhclientConf(4)
+func TestExtractV6Addrs_NoIANAYieldsNil(t *testing.T) {
+	// A reply with no IA_NA option must produce no addresses, not
+	// panic. This is the SLAAC-only-server path: the server replies
+	// but doesn't hand out a stateful address.
+	msg, err := dhcpv6.NewMessage()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewMessage: %v", err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("file should exist before cleanup: %v", err)
-	}
-	cleanup()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("file should be removed after cleanup, stat err: %v", err)
+	if got := extractV6Addrs(msg); got != nil {
+		t.Errorf("expected nil, got %v", got)
 	}
 }
 
@@ -127,3 +104,11 @@ func TestSleepBackoff_RespectsContextCancel(t *testing.T) {
 		t.Errorf("sleepBackoff blocked for %s, expected near-zero", elapsed)
 	}
 }
+
+// encodeUint32 is the wire encoding of a 32-bit DHCP option value:
+// 4 bytes big-endian. Used by the renewal-time test to construct an
+// explicit T1 option.
+func encodeUint32(v uint32) []byte {
+	return []byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
+}
+

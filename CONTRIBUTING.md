@@ -50,8 +50,9 @@ A change is ready to merge when:
   multiplexing). anchord stops at layer 4 by design. If you need
   layer-7, run a reverse proxy as a service-anchor.
 - Shelling out to `nft` / `ip` / other userland tools when a netlink
-  Go library is available. `dhclient` and `conntrack` are the only
-  intentional subprocess dependencies.
+  Go library is available. `conntrack` is currently the only
+  intentional subprocess dependency. (DHCP is pure-Go via
+  `github.com/insomniacslk/dhcp`; don't regress that.)
 
 See [`CLAUDE.md`](CLAUDE.md) "Don't do" for the full list.
 

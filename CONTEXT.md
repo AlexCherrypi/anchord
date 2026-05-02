@@ -102,7 +102,7 @@ suggestion.
 | Go | Single static binary, native netlink, atomic concurrency | Bash (state diff gets ugly past 300 lines); Python (deps) |
 | nftables | Atomic map updates, modern kernel API | iptables (no atomic replace, deprecated path) |
 | `google/nftables` | Speaks netlink directly | Shelling out to `nft` (subprocess overhead, parser fragility) |
-| dhclient (subprocess) | Battle-tested renewal/hooks | Pure-Go DHCP libs (less proven in weird DHCP servers) |
+| `insomniacslk/dhcp` (pure-Go) | One binary, no subprocess to supervise, no `dhclient.conf` shim, no ISC-DHCP-EOL exposure | Subprocessing `dhclient` (was the v0.1 choice — battle-tested but inflated the image and conflated process lifecycle with DHCP-protocol state) |
 | macvlan, not ipvlan | DHCP-by-MAC works | ipvlan L2 (shared MAC defeats DHCP reservation) |
 | Docker socket proxy | Read-only access to events/containers | Mounting the raw socket (root-equivalent) |
 | Compose-label-driven | No central config to drift | Static config files |

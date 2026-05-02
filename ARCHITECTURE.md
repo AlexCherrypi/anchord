@@ -319,10 +319,11 @@ table ip anchord_v4 {
 }
 ```
 
-Plus an `anchord-ext` macvlan child on `eth0.42`, plus a `dhclient`
-running on it, plus periodic conntrack flushes when the maps change.
+Plus an `anchord-ext` macvlan child on `eth0.42`, plus a pure-Go DHCP
+client (`github.com/insomniacslk/dhcp`) holding its lease, plus
+periodic conntrack flushes when the maps change.
 
-The user never writes any IP, any nftables rule, any dhclient config.
+The user never writes any IP, any nftables rule, any DHCP config.
 They write a project name, a VLAN parent, and labels. Everything else
 is derived.
 

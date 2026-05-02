@@ -43,7 +43,11 @@ Pre-alpha. Functional surface as of 2026-05-02:
 
 Next gaps: see "Open questions / future work" below. Highest leverage
 for v1.0 readiness is real-host validation; the rest are SPEC-level
-decisions (metrics, health, DHCPv6).
+decisions (metrics, health).
+
+DHCP is pure-Go as of 2026-05-02 (`github.com/insomniacslk/dhcp` via
+`internal/dhcp/dhcp.go`); no more `dhclient` subprocess and no more
+ISC-DHCP-EOL concern.
 
 ## Code conventions
 
@@ -74,9 +78,9 @@ decisions (metrics, health, DHCPv6).
   CONTEXT.md "Configuration scarcity".)
 - Don't add iptables paths. nftables only.
 - Don't shell out to `nft`, `ip` or other userland tools when a netlink
-  Go library is available. `dhclient` and `conntrack` are the only
-  intentional subprocess dependencies; both have justifications in the
-  Dockerfile.
+  Go library is available. `conntrack` is currently the only intentional
+  subprocess dependency; the justification is in the Dockerfile. (DHCP
+  is pure-Go via `github.com/insomniacslk/dhcp`; do not regress that.)
 - Don't add features that operate above layer 4. (See CONTEXT.md "Layer 4
   hard stop".)
 - Don't break the atomic-update guarantee on inbound NAT. (See SPEC F-19.)
@@ -152,32 +156,40 @@ project genesis:
   `E2E_BRIDGE_FLOOD_FIX`. Closes the env-quirk caveat for good.
 - [ ] Decide on Prometheus metrics surface (which counters/gauges).
   Likely candidates: reconcile latency, DHCP lease age, dnat_tcp/udp
-  map size, conntrack flushes, dhclient restart count. Needs a SPEC
+  map size, conntrack flushes, DHCP-client restart count. Needs a SPEC
   decision before implementation.
 - [ ] Health endpoint shape (`/healthz` returns what exactly?).
   Liveness vs. readiness; what counts as "ready" — tables installed?
   first lease? first reconcile? Needs a SPEC decision.
-- [x] DHCPv6 feature parity. `dhcp.Supervisor` now runs `dhclient -4`
-  and `dhclient -6` in parallel under a shared child context (see
-  `runDhclients`). Per-family `dhclient.conf` is generated on the fly
-  — `host-name` for v4, `dhcp6.client-fqdn` for v6 (RFC 4704 client
-  FQDN, flags=0 → "let server decide" on DNS updates). Both
-  subprocesses are killed together when the link watcher fires, so
-  recovery from parent flap covers v6 too. New e2e scenario
+- [x] DHCPv6 feature parity. `dhcp.Supervisor` runs pure-Go v4 + v6
+  client goroutines in parallel under a shared child context (see
+  `runClients` / `runFamily`). Hostname/FQDN options are passed via
+  `dhcpv4.OptHostName` and `dhcpv6.WithFQDN(0, hostname)` (RFC 4704
+  client FQDN, flags=0 → "let server decide" on DNS updates). Both
+  goroutines are cancelled together when the link watcher fires, so
+  recovery from parent flap covers v6 too. e2e scenario
   `dhcpv6-stateful` has dnsmasq announce stateful DHCPv6 instead of
   SLAAC and asserts anchord-ext gets its v6 address via the DHCPv6
-  path (16/16 green, plus the existing scenarios still pass — v6 SLAAC
-  scenarios still work because `dhclient -6` quietly spins on networks
-  without a DHCPv6 server, the kernel still does SLAAC from the RA).
+  path. v6 SLAAC scenarios still work because the v6 goroutine
+  silently retries SOLICIT on networks without a DHCPv6 server, while
+  the kernel does SLAAC from the RA in parallel.
 - [x] Behavior when the VLAN parent interface goes down mid-run.
-  `dhcp.Supervisor.Run` now calls an idempotent `ensureLink` at the
-  top of every iteration and runs a 2 s link-state watcher alongside
-  dhclient (`watchLinkUsable`). When the macvlan child disappears or
-  is brought down — parent flap, external `ip link del`, etc. — the
-  watcher cancels dhclient's child context, dhclient is killed, the
-  loop wraps around and `ensureLink` recreates the child. Verified
-  by smoke-testing `ip link del anchord-ext` while the stack was up:
-  link comes back at a new ifindex with the same IP within ~12 s.
+  `dhcp.Supervisor.Run` calls an idempotent `ensureLink` at the top
+  of every iteration and runs a 2 s link-state watcher alongside the
+  DHCP-client goroutines (`watchLinkUsable`). When the macvlan child
+  disappears or is brought down — parent flap, external `ip link del`,
+  etc. — the watcher cancels the child context, the goroutines exit
+  (sending DHCPRELEASE for v4 on the way out), the loop wraps around
+  and `ensureLink` recreates the child. Verified by smoke-testing
+  `ip link del anchord-ext` while the stack was up: link comes back
+  at a new ifindex with the same IP within ~12 s.
+- [x] Replace `dhclient` subprocess with pure-Go DHCP client. v0.1
+  shelled out to ISC `dhclient`; that has been migrated to
+  `github.com/insomniacslk/dhcp` (the `dhcpv4/nclient4` and
+  `dhcpv6/nclient6` packages). Image no longer needs the `dhclient`
+  apk. Renewal/release/IP-application now happen inline via netlink.
+  Pure-Go DHCP simplifies the supervisor (no subprocess management,
+  no temp `dhclient.conf` files) and removes ISC-DHCP's EOL concern.
 
 ## Style notes for human-facing text
 

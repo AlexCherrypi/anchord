@@ -49,9 +49,10 @@ Out of scope:
 
 - Misconfiguration of the host kernel sysctls listed in `compose.example.yaml`
   — those are the operator's responsibility.
-- Bugs in `dhclient`, `conntrack`, the kernel's nftables implementation,
-  or Docker itself, unless anchord is using them in a way that
-  predictably triggers a security-relevant failure mode.
+- Bugs in `conntrack`, the kernel's nftables implementation, the
+  `github.com/insomniacslk/dhcp` library, or Docker itself, unless
+  anchord is using them in a way that predictably triggers a
+  security-relevant failure mode.
 
 ## Dismissed advisories (audit trail)
 

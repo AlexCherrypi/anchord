@@ -10,8 +10,8 @@
 #
 # Known limitation: when this stack runs on top of Docker Desktop's
 # Linux VM (Windows/macOS), L2 frames sent by a macvlan child onto a
-# Docker bridge do NOT reliably reach peer veth endpoints. dhclient
-# DISCOVERs leave anchord-ext but never arrive at dnsmasq, so v4 lease
+# Docker bridge do NOT reliably reach peer veth endpoints. anchord's
+# DHCPDISCOVERs leave anchord-ext but never arrive at dnsmasq, so v4 lease
 # / v6 SLAAC assertions fail in that environment. Everything else
 # (anchord boot, nftables, discovery, DNAT map population) is verified
 # correctly. Real Linux hosts with a physical VLAN parent are unaffected.
