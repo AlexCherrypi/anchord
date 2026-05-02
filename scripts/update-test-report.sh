@@ -104,10 +104,15 @@ if ! docker run --rm \
 fi
 
 # Strip ANSI colour codes the harness emits, then take the summary.
+# The summary lines look like
+#   "  v4-only      14 pass" or
+#   "  both         15 pass, 1 fail"
+# — grab any indented "<word> <num> pass…" line so adding new
+# scenarios doesn't require also touching this regex.
 e2e_summary=$(awk '/=== summary ===/,0' /tmp/e2e.log \
               | sed -E 's/\x1b\[[0-9;]*m//g' \
               | sed '1d' \
-              | grep -E '^[[:space:]]*(v4-only|v6-only|both|none)[[:space:]]' \
+              | grep -E '^[[:space:]]+[a-z][a-z0-9-]*[[:space:]]+[0-9]+ pass' \
               | sed 's/^[[:space:]]*/  /')
 
 # ---- 3. assemble the new report block ---------------------------------------

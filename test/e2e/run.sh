@@ -20,9 +20,9 @@ wait_seconds="${WAIT_SECONDS:-15}"
 no_teardown="${NO_TEARDOWN:-0}"
 bridge_flood_fix="${E2E_BRIDGE_FLOOD_FIX:-0}"
 
-# Default to all four scenarios if no args given.
+# Default to all five scenarios if no args given.
 if [ "$#" -eq 0 ]; then
-    set -- v4-only v6-only both none
+    set -- v4-only v6-only both none dhcpv6-stateful
 fi
 
 # ---- log helpers ---------------------------------------------------------
@@ -150,6 +150,10 @@ run_scenario() {
             check "anchord-ext has IPv4 from 10.99.0.0/24"   "$has_v4" "$v4_out"
             check "anchord-ext has IPv6 from fd99::/64 (RA)" "$has_v6" "$v6_out"
             ;;
+        dhcpv6-stateful)
+            check "anchord-ext has IPv4 from 10.99.0.0/24"      "$has_v4" "$v4_out"
+            check "anchord-ext has IPv6 from fd99::/64 (DHCPv6)" "$has_v6" "$v6_out"
+            ;;
         none)
             check "anchord-ext has no IPv4 lease (expected)" "$([ $has_v4 -eq 0 ] && echo 1 || echo 0)" "$v4_out"
             check "anchord-ext has no IPv6 (expected)"       "$([ $has_v6 -eq 0 ] && echo 1 || echo 0)" "$v6_out"
@@ -157,18 +161,22 @@ run_scenario() {
     esac
 
     # 5. DNAT map populated for the smtp-anchor's exposed port (tcp/25).
-    if [ "$scenario" = "v4-only" ] || [ "$scenario" = "both" ]; then
-        ax "$project" nft list map ip anchord_v4 dnat_tcp
-        local has_25=0
-        [[ "$REPLY_STDOUT" =~ 25[[:space:]]*: ]] && has_25=1
-        check "anchord_v4 dnat_tcp contains port 25" "$has_25" "$REPLY_STDOUT"
-    fi
-    if [ "$scenario" = "v6-only" ] || [ "$scenario" = "both" ]; then
-        ax "$project" nft list map ip6 anchord_v6 dnat_tcp
-        local has_25=0
-        [[ "$REPLY_STDOUT" =~ 25[[:space:]]*: ]] && has_25=1
-        check "anchord_v6 dnat_tcp contains port 25" "$has_25" "$REPLY_STDOUT"
-    fi
+    case "$scenario" in
+        v4-only|both|dhcpv6-stateful)
+            ax "$project" nft list map ip anchord_v4 dnat_tcp
+            local has_25=0
+            [[ "$REPLY_STDOUT" =~ 25[[:space:]]*: ]] && has_25=1
+            check "anchord_v4 dnat_tcp contains port 25" "$has_25" "$REPLY_STDOUT"
+            ;;
+    esac
+    case "$scenario" in
+        v6-only|both|dhcpv6-stateful)
+            ax "$project" nft list map ip6 anchord_v6 dnat_tcp
+            local has_25=0
+            [[ "$REPLY_STDOUT" =~ 25[[:space:]]*: ]] && has_25=1
+            check "anchord_v6 dnat_tcp contains port 25" "$has_25" "$REPLY_STDOUT"
+            ;;
+    esac
 
     # ---- Phase 2: inbound dataplane (S-2, S-3) ---------------------------
     # Extract the project's external addresses (if any) and exercise the

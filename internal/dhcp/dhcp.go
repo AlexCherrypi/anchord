@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -82,21 +83,21 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		// Reset backoff on a successful link state.
 		backoff = time.Second
 
-		// Run dhclient under a child context so we can cancel it
-		// independently of the supervisor's own context. dhclient
-		// does NOT exit when the interface it's bound to is deleted
-		// — it just retries internally and prints
+		// Run dhclient (v4 + v6 in parallel) under a child context so
+		// we can cancel it independently of the supervisor's own
+		// context. dhclient does NOT exit when the interface it's
+		// bound to is deleted — it just retries internally and prints
 		// "receive_packet failed on …: Network is down". Without an
 		// external watcher we'd never re-run ensureLink. The watcher
 		// goroutine cancels the child context as soon as the link
-		// stops being usable, which kills dhclient (exec.CommandContext
-		// SIGKILLs on cancel) and falls back into this loop's
-		// ensureLink path.
+		// stops being usable, which kills both dhclient processes
+		// (exec.CommandContext SIGKILLs on cancel) and falls back
+		// into this loop's ensureLink path.
 		dhCtx, dhCancel := context.WithCancel(ctx)
 		watchDone := make(chan struct{})
 		go s.watchLinkUsable(dhCtx, dhCancel, watchDone)
 
-		err := s.runDhclient(dhCtx)
+		err := s.runDhclients(dhCtx)
 		dhCancel()
 		<-watchDone
 
@@ -245,44 +246,93 @@ func (s *Supervisor) removeLink() {
 	}
 }
 
-// runDhclient runs `dhclient -d` in the foreground, attached to the
+// runDhclients runs the v4 and v6 dhclient subprocesses in parallel,
+// returns when the first one exits (the caller will cancel the shared
+// context, which terminates the other). On a network without DHCPv6
+// the v6 process simply spins on SOLICIT-with-no-reply forever and
+// never exits — that's the same behaviour a real DHCPv6 client has,
+// and matches dhclient -4 on a network without v4 DHCP.
+func (s *Supervisor) runDhclients(ctx context.Context) error {
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errCh <- s.runDhclient(cctx, 4)
+	}()
+	go func() {
+		defer wg.Done()
+		errCh <- s.runDhclient(cctx, 6)
+	}()
+
+	// Wait for the first family to fall over (or the parent ctx to
+	// be cancelled), then signal the sibling and wait for it to exit
+	// before returning.
+	first := <-errCh
+	cancel()
+	wg.Wait()
+	return first
+}
+
+// runDhclient runs one dhclient process for the given family on the
 // macvlan, and returns when the process exits. -d keeps it foreground;
 // -v gets us log output we can capture; -1 would make it one-shot but
-// we want continuous renewal handling, so we omit it.
+// we want continuous renewal handling, so we omit it. -6 selects the
+// DHCPv6 path; absent, dhclient defaults to v4.
 //
-// Hostname is announced to the DHCP server via a generated config file
-// (send host-name "..."). The -H flag is not portable — Alpine's ISC
-// dhclient build does not accept it.
-func (s *Supervisor) runDhclient(ctx context.Context) error {
-	confPath, cleanup, err := s.writeDhclientConf()
+// Hostname is announced via a per-family generated dhclient.conf
+// (`host-name` for v4, `dhcp6.client-fqdn` for v6). The -H flag is
+// not portable — Alpine's ISC dhclient build does not accept it.
+func (s *Supervisor) runDhclient(ctx context.Context, family int) error {
+	confPath, cleanup, err := s.writeDhclientConf(family)
 	if err != nil {
 		return fmt.Errorf("write dhclient.conf: %w", err)
 	}
 	defer cleanup()
 
 	args := []string{
-		"-d",          // foreground
-		"-v",          // verbose
+		"-d", // foreground
+		"-v", // verbose
 		"-cf", confPath,
-		s.ifaceName,
 	}
+	if family == 6 {
+		args = append(args, "-6")
+	}
+	args = append(args, s.ifaceName)
+
 	cmd := exec.CommandContext(ctx, "dhclient", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	slog.Info("starting dhclient", "iface", s.ifaceName, "hostname", s.hostname)
+	slog.Info("starting dhclient",
+		"iface", s.ifaceName,
+		"family", family,
+		"hostname", s.hostname)
 	return cmd.Run()
 }
 
-// writeDhclientConf produces a minimal dhclient.conf that asks the
-// server to record our hostname. The returned cleanup removes the
-// temp file on completion.
-func (s *Supervisor) writeDhclientConf() (string, func(), error) {
-	// `send host-name` is the standard ISC dhclient incantation. We
-	// quote the hostname; any embedded `"` or `\` would need escaping
-	// but anchord's hostname comes from project name / env, neither
-	// of which legitimately contains those characters.
-	content := fmt.Sprintf("send host-name \"%s\";\n", s.hostname)
-	f, err := os.CreateTemp("", "anchord-dhclient-*.conf")
+// writeDhclientConf produces a minimal per-family dhclient.conf that
+// asks the server to record our hostname. The returned cleanup
+// removes the temp file on completion.
+func (s *Supervisor) writeDhclientConf(family int) (string, func(), error) {
+	// We quote the hostname; any embedded `"` or `\` would need
+	// escaping but anchord's hostname comes from project name / env,
+	// neither of which legitimately contains those characters.
+	//
+	// For v4: `host-name` is the standard ISC dhclient incantation.
+	// For v6: `dhcp6.client-fqdn` is the DHCPv6 Client-FQDN option
+	// (RFC 4704); the leading "0" is the flags byte (S=0, O=0, N=0
+	// — let the server decide whether to update DNS).
+	var content string
+	if family == 6 {
+		content = fmt.Sprintf("send dhcp6.client-fqdn \"0 %s\";\n", s.hostname)
+	} else {
+		content = fmt.Sprintf("send host-name \"%s\";\n", s.hostname)
+	}
+	pattern := fmt.Sprintf("anchord-dhclient%d-*.conf", family)
+	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return "", func() {}, err
 	}

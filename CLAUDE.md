@@ -157,10 +157,18 @@ project genesis:
 - [ ] Health endpoint shape (`/healthz` returns what exactly?).
   Liveness vs. readiness; what counts as "ready" — tables installed?
   first lease? first reconcile? Needs a SPEC decision.
-- [ ] DHCPv6 handling — currently we assume SLAAC is enough for v6.
-  e2e v6-only run confirms SLAAC works through anchord's macvlan child.
-  DHCPv6 (e.g. for hostname-announcement on v6) is not implemented;
-  decision pending: ship in v0.1 or defer.
+- [x] DHCPv6 feature parity. `dhcp.Supervisor` now runs `dhclient -4`
+  and `dhclient -6` in parallel under a shared child context (see
+  `runDhclients`). Per-family `dhclient.conf` is generated on the fly
+  — `host-name` for v4, `dhcp6.client-fqdn` for v6 (RFC 4704 client
+  FQDN, flags=0 → "let server decide" on DNS updates). Both
+  subprocesses are killed together when the link watcher fires, so
+  recovery from parent flap covers v6 too. New e2e scenario
+  `dhcpv6-stateful` has dnsmasq announce stateful DHCPv6 instead of
+  SLAAC and asserts anchord-ext gets its v6 address via the DHCPv6
+  path (16/16 green, plus the existing scenarios still pass — v6 SLAAC
+  scenarios still work because `dhclient -6` quietly spins on networks
+  without a DHCPv6 server, the kernel still does SLAAC from the RA).
 - [x] Behavior when the VLAN parent interface goes down mid-run.
   `dhcp.Supervisor.Run` now calls an idempotent `ensureLink` at the
   top of every iteration and runs a 2 s link-state watcher alongside
