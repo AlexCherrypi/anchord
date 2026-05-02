@@ -292,9 +292,6 @@ the release-gate contract.
   Default is `anchord`, which matches the canonical service name in the
   example compose. If you rename the network-anchor service, set
   `ANCHORD_GATEWAY_HOSTNAME` on each service-anchor to match.
-- **Host ↔ project access** does not work over the macvlan from the docker
-  host itself (Linux kernel quirk, not anchord's fault). If the host needs
-  to reach the project, add a small macvlan shim on the host.
 - **One network-anchor per Compose project** — the design assumes per-project
   scoping. Running multiple in the same project will race on nftables
   tables.
