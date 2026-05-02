@@ -4,6 +4,7 @@
 [![Container](https://img.shields.io/badge/ghcr.io-anchord-blue?logo=docker)](https://github.com/AlexCherrypi/anchord/pkgs/container/anchord)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/AlexCherrypi/anchord)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/AlexCherrypi/anchord)
 
 > One IP per Compose project. No subnet bookkeeping. Real client source IPs.
 
