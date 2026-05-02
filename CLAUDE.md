@@ -2,13 +2,15 @@
 
 > Instructions for Claude Code (and any other LLM agent) picking up work
 > on this project.
-
 ## Read these first, in order
 
-1. `SPEC.md` — what anchord must do (acceptance criteria, testable).
-2. `CONTEXT.md` — why anchord is shaped the way it is (design principles,
+1. `ARCHITECTURE.md` — the three-role model (network-anchor, service-anchors,
+   backends) and how traffic flows. The mental map you need to read anything
+   else correctly.
+2. `SPEC.md` — what anchord must do (acceptance criteria, testable).
+3. `CONTEXT.md` — why anchord is shaped the way it is (design principles,
    rejected alternatives).
-3. `README.md` — how a user encounters anchord (mental model first, then
+4. `README.md` — how a user encounters anchord (mental model first, then
    architecture, then config).
 
 If a request to you contradicts SPEC or CONTEXT, surface that contradiction
