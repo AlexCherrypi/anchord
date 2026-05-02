@@ -9,7 +9,7 @@
 # nmap-ncat is used in preference to busybox nc because busybox's -w
 # behavior is inconsistent across alpine versions; ncat handles
 # `-w 2` + `< /dev/null` predictably.
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache nmap-ncat iproute2
 

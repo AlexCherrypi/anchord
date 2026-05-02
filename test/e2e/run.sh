@@ -501,7 +501,7 @@ apply_bridge_flood_fix() {
     # for a future per-bridge variant and for log clarity.
     local project=$1
 
-    if docker run --rm --net=host --privileged alpine:3.19 sh -c "
+    if docker run --rm --net=host --privileged alpine:3.21 sh -c "
         echo 0 > /proc/sys/net/bridge/bridge-nf-call-iptables  2>/dev/null
         echo 0 > /proc/sys/net/bridge/bridge-nf-call-ip6tables 2>/dev/null
     " >/dev/null 2>&1; then

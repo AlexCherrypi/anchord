@@ -7,7 +7,7 @@
 # a container (Docker-in-Docker path translation issues).
 #
 # Build context: test/e2e/  (so we can COPY dhcp-configs/ alongside).
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache dnsmasq tcpdump iproute2
 

@@ -4,7 +4,7 @@
 # CLI + compose plugin so it can drive the host's Docker daemon via the
 # bind-mounted /var/run/docker.sock. This is the "all tests run in
 # Docker" pattern — the runner is identical on Linux/macOS/Windows.
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache \
         docker-cli \

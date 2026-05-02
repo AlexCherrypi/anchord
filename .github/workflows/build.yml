@@ -21,7 +21,7 @@ jobs:
       - run: go test -v ./...
 
   image:
-    name: docker image
+    name: docker image (multi-arch)
     needs: go
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
@@ -30,6 +30,13 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      # QEMU registers binfmt handlers so the runtime stage's
+      # `apk add` can run under emulation for non-native architectures.
+      # The build stage itself is pinned to BUILDPLATFORM (native) and
+      # cross-compiles, so emulation is only needed for ~3 RUN lines.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -45,10 +52,16 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
+      # Platform list mirrors what alpine:3.21 publishes — eight
+      # architectures covering essentially every Linux host that runs
+      # Docker today: x86 (amd64/386), ARM64 (Pi 4/5, Apple Silicon,
+      # Graviton), ARMv7/v6 (Pi 1/2/3, Zero), POWER (ppc64le), IBM Z
+      # (s390x), and RISC-V (riscv64).
       - uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6,linux/386,linux/ppc64le,linux/s390x,linux/riscv64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

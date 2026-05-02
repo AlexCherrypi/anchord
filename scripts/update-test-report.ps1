@@ -30,6 +30,6 @@ $floodFix = if ($env:E2E_BRIDGE_FLOOD_FIX) { $env:E2E_BRIDGE_FLOOD_FIX } else { 
     -e IN_DOCKER_RUNNER=1 `
     -e "HOST_REPO_PATH=${repoRoot}" `
     -e "E2E_BRIDGE_FLOOD_FIX=${floodFix}" `
-    alpine:3.19 `
+    alpine:3.21 `
     sh -c "apk add -q --no-cache bash git docker-cli docker-cli-compose jq >/dev/null && exec bash scripts/update-test-report.sh"
 exit $LASTEXITCODE

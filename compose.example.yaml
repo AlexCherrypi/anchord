@@ -63,7 +63,7 @@ services:
 
   # ---------- service anchor: SMTP -----------------------------------------
   smtp-anchor:
-    image: alpine:3.19
+    image: alpine:3.21
     command: ["sleep", "infinity"]
     networks:
       - transit
@@ -82,7 +82,7 @@ services:
 
   # ---------- service anchor: IMAP -----------------------------------------
   imap-anchor:
-    image: alpine:3.19
+    image: alpine:3.21
     command: ["sleep", "infinity"]
     networks:
       - transit

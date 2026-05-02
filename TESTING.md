@@ -61,7 +61,7 @@ bash scripts/verify-test-report.sh
 
 # Windows (PowerShell)
 docker run --rm -v "${PWD}:/repo" -w /repo `
-    alpine:3.19 sh -c "apk add -q --no-cache bash git >/dev/null && bash scripts/verify-test-report.sh"
+    alpine:3.21 sh -c "apk add -q --no-cache bash git >/dev/null && bash scripts/verify-test-report.sh"
 ```
 
 A `0` exit means the README's recorded hash matches the current source.

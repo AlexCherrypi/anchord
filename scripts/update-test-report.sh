@@ -37,7 +37,7 @@ if [ "${IN_DOCKER_RUNNER:-0}" != "1" ]; then
         -e IN_DOCKER_RUNNER=1 \
         -e HOST_REPO_PATH="${repo_host}" \
         -e E2E_BRIDGE_FLOOD_FIX="${E2E_BRIDGE_FLOOD_FIX:-1}" \
-        alpine:3.19 \
+        alpine:3.21 \
         sh -c '
             apk add -q --no-cache bash git docker-cli docker-cli-compose jq >/dev/null
             exec bash scripts/update-test-report.sh

@@ -11,7 +11,7 @@
 #
 # socat's TCP6-LISTEN with ipv6only=0 binds dual-stack, so both IPv4 and
 # IPv6 inbound paths land in the same listener.
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache socat
 

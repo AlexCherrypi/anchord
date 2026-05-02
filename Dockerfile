@@ -1,7 +1,15 @@
 # syntax=docker/dockerfile:1.6
 
 # ---- build stage ------------------------------------------------------------
-FROM golang:1.25-alpine AS build
+# --platform=$BUILDPLATFORM pins this stage to the build host's native
+# architecture so we cross-compile (fast) instead of running the Go
+# toolchain under QEMU emulation (slow). TARGETOS/TARGETARCH/TARGETVARIANT
+# are populated by buildx from the --platform flag of `docker buildx build`.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 WORKDIR /src
 
@@ -11,20 +19,27 @@ RUN go mod download
 
 COPY . .
 
-# Static build — anchord runs in a distroless image.
-ENV CGO_ENABLED=0 GOOS=linux
-RUN go build \
+# CGO disabled → fully static binary, no glibc/musl dependency at
+# runtime. GOARM is the ARM ISA level: arm/v6 → GOARM=6, arm/v7 →
+# GOARM=7. The ${TARGETVARIANT#v} strip handles both.
+ENV CGO_ENABLED=0
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} \
+    go build \
     -ldflags="-s -w -X main.version=$(git describe --tags --always 2>/dev/null || echo dev)" \
     -trimpath \
     -o /out/anchord \
     ./cmd/anchord
 
 # ---- runtime stage ----------------------------------------------------------
-# DHCP is now pure-Go (github.com/insomniacslk/dhcp), so dhclient is
-# no longer a runtime dependency. We still need conntrack-tools (for
+# DHCP is pure-Go (github.com/insomniacslk/dhcp), so dhclient is no
+# longer a runtime dependency. We still need conntrack-tools (for
 # flushing stale entries on backend IP changes) and nftables/iproute2
 # for diagnostics, so the runtime is Alpine rather than distroless.
-FROM alpine:3.19
+#
+# alpine:3.21 was chosen for its multi-arch coverage: it ships for
+# linux/{amd64, arm64, arm/v7, arm/v6, 386, ppc64le, s390x, riscv64}
+# — the same set anchord publishes via buildx.
+FROM alpine:3.21
 
 RUN apk add --no-cache \
         conntrack-tools \
