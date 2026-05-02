@@ -1,0 +1,23 @@
+# Continuous integration: go vet + unit tests on every push and PR.
+# This is informational; it does NOT gate releases. The release gate
+# is .github/workflows/release-gate.yml, which checks that the
+# recorded test report matches the source.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go vet ./...
+      - run: go test -count=1 ./...

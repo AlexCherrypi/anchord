@@ -241,6 +241,15 @@ go build ./cmd/anchord
 docker build -t anchord:dev .
 ```
 
+## Testing
+
+The full test suite (Go unit tests + e2e harness across all four DHCP
+scenarios) is invoked via `scripts/update-test-report.sh`, which runs
+host-independently inside a Docker container and rewrites the
+auto-generated **Test report** block at the bottom of this README on
+green. See [TESTING.md](TESTING.md) for the per-platform commands and
+the release-gate contract.
+
 ## Caveats and known limitations
 
 - **Kernel ≥ 4.18** required for atomic nftables map replaces.
@@ -263,3 +272,35 @@ docker build -t anchord:dev .
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+<!-- TEST-REPORT-START -->
+## Test report (auto-generated)
+
+This block is rewritten by `scripts/update-test-report.sh` after a
+green run of the full test suite. The release pipeline rejects any
+tag whose recorded hash does not match the current source — so this
+block is the project's release-readiness signal.
+
+```
+Last verified: 2026-05-02T18:36:29Z
+Code hash:     sha256:98debd4591a2f08efb382fecfb0e6687357b27c80daa005718a82306cde80a0e
+Flood fix:     E2E_BRIDGE_FLOOD_FIX=1
+
+go vet + go test ./...
+ok  	github.com/AlexCherrypi/anchord/cmd/anchord	0.008s
+ok  	github.com/AlexCherrypi/anchord/internal/config	0.006s
+?   	github.com/AlexCherrypi/anchord/internal/conntrack	[no test files]
+?   	github.com/AlexCherrypi/anchord/internal/dhcp	[no test files]
+ok  	github.com/AlexCherrypi/anchord/internal/discovery	0.007s
+ok  	github.com/AlexCherrypi/anchord/internal/labels	0.006s
+ok  	github.com/AlexCherrypi/anchord/internal/nat	0.006s
+ok  	github.com/AlexCherrypi/anchord/internal/reconciler	0.006s
+ok  	github.com/AlexCherrypi/anchord/internal/serviceanchor	0.015s
+
+e2e harness (test/e2e, all four DHCP scenarios)
+  v4-only      14 pass
+  v6-only      14 pass
+  both         16 pass
+  none         10 pass
+```
+<!-- TEST-REPORT-END -->

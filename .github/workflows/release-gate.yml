@@ -1,0 +1,34 @@
+# Release gate.
+#
+# Runs on every tag push (vX.Y.Z). Refuses the release if README's
+# auto-generated TEST-REPORT block does not record a green run for
+# the current source tree — i.e., the commit being tagged differs
+# from the commit that was last verified end-to-end.
+#
+# This is intentionally cheap and trust-based: the gate doesn't
+# re-run the full test suite (the e2e harness needs Docker-in-Docker
+# and bridge sysctl access, which GitHub-hosted runners don't always
+# allow). It just verifies the hash recorded in README.md was
+# produced by scripts/update-test-report.sh, which only writes after
+# a green local run.
+#
+# To unblock a tag whose verify failed: re-run
+# scripts/update-test-report.sh locally, commit README.md, and
+# re-tag.
+name: Release gate
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-test-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify recorded test report matches current source
+        run: bash scripts/verify-test-report.sh
