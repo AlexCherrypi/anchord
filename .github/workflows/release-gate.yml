@@ -1,20 +1,25 @@
 # Release gate.
 #
-# Runs on every tag push (vX.Y.Z). Refuses the release if README's
-# auto-generated TEST-REPORT block does not record a green run for
-# the current source tree — i.e., the commit being tagged differs
-# from the commit that was last verified end-to-end.
+# Runs on every tag push (vX.Y.Z). Two blocking checks:
 #
-# This is intentionally cheap and trust-based: the gate doesn't
-# re-run the full test suite (the e2e harness needs Docker-in-Docker
-# and bridge sysctl access, which GitHub-hosted runners don't always
-# allow). It just verifies the hash recorded in README.md was
-# produced by scripts/update-test-report.sh, which only writes after
-# a green local run.
+#   1. The tagged commit must be reachable from main. Tags on feature
+#      branches don't release — main is the canonical line of history.
+#   2. The auto-generated TEST-REPORT block in README.md must record
+#      the current source's code hash. The block is only ever written
+#      by scripts/update-test-report.sh after a green run of the full
+#      test suite, so a matching hash means "this exact source passed
+#      end-to-end, locally, on a Docker host that could run the e2e
+#      harness".
 #
-# To unblock a tag whose verify failed: re-run
-# scripts/update-test-report.sh locally, commit README.md, and
-# re-tag.
+# The gate is intentionally cheap and trust-based: it does not re-run
+# the e2e harness in CI (Docker-in-Docker on GitHub-hosted runners
+# is flaky and slow). The trust chain is "update-test-report.sh only
+# writes README.md on green" → "matching hash ⇒ matching green run".
+#
+# To unblock a tag whose check failed:
+#   - tag-not-on-main: merge to main first, re-tag.
+#   - report-stale:    run scripts/update-test-report.sh locally,
+#                      commit README.md, re-tag.
 name: Release gate
 
 on:
@@ -26,7 +31,26 @@ permissions:
   contents: read
 
 jobs:
+  verify-tag-on-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so merge-base can decide ancestry. Without
+          # fetch-depth: 0 the runner only has the tagged commit.
+          fetch-depth: 0
+      - name: Tag must be reachable from main
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tagged commit $GITHUB_SHA is not on main."
+            echo "Releases must come from main. Merge to main first, then re-tag."
+            exit 1
+          fi
+          echo "Tag is on main ✓"
+
   verify-test-report:
+    needs: verify-tag-on-main
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

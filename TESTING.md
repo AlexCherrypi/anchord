@@ -72,15 +72,32 @@ the test report block); re-run `update-test-report.sh` and commit.
 
 - `.github/workflows/ci.yml` runs `go vet` + `go test` on every push
   and PR. Informational; never blocks.
-- `.github/workflows/release-gate.yml` runs `verify-test-report.sh` on
-  every `v*` tag. Blocking — fails the release if the recorded hash
-  is stale.
+- `.github/workflows/release-gate.yml` runs on every `v*` tag and
+  blocks the release unless **both** of:
+    1. the tagged commit is reachable from `main` (tags on feature
+       branches never release), and
+    2. README.md's recorded test-report hash matches the current
+       source.
 
 The gate is intentionally trust-based and cheap: it does not re-run
 the e2e harness in CI (Docker-in-Docker on GitHub-hosted runners is
 flaky and slow). Instead, it trusts that
 `scripts/update-test-report.sh` only ever writes to README.md after a
 green run, so a matching hash means a matching successful run.
+
+### Recommended branch protection on `main`
+
+The gate guarantees release-readiness for the *commit being tagged*.
+To make the gate maximally useful, also configure GitHub branch
+protection on `main`:
+
+- Require pull requests before merging.
+- Require status checks (`CI / go-tests`) to pass before merge.
+- Disallow direct pushes to `main`.
+
+That way every commit on `main` has at least passed `go vet` + `go test`,
+and a release tag on `main` reflects an end-to-end-verified state via
+the test report block.
 
 ## Running just one piece
 
