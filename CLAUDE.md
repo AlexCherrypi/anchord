@@ -18,12 +18,13 @@ before writing code. Don't quietly route around the design.
 
 ## Project status
 
-Pre-alpha. Skeleton was generated in one session and has not yet been
-compiled end-to-end (the original sandbox couldn't reach the Go module
-proxy). First task on a real machine is `go mod tidy && go build ./...`
-and resolving whatever the actual `nftables` v0.2.0 API names are — the
-DNAT rule construction in `internal/nat/nat.go` is the most likely spot
-to need a small fix.
+Pre-alpha. The skeleton compiles end-to-end: `go vet ./...`,
+`go build ./...`, `go test ./...` and `docker build` all pass clean as
+of 2026-05-02. The `nftables` v0.2.0 API matched what the code already
+expected, no fixes required.
+
+Next gaps are real-host validation against an actual VLAN/DHCP server
+and the integration test harness — see Open questions below.
 
 ## Code conventions
 
@@ -39,8 +40,10 @@ to need a small fix.
   goroutines that aren't tied to a context.
 - **Tests:** table-driven, `t.Run` subtests. Public surface of every
   package needs at least happy-path coverage. Integration tests with
-  real netlink/nftables go in `test/integration/` and are gated behind
-  a build tag (`//go:build integration`).
+  real netlink/nftables live alongside the package they exercise (e.g.
+  `internal/nat/nat_integration_test.go`) and are gated behind a build
+  tag (`//go:build integration`). The privileged Docker driver to run
+  them lives in `test/integration/`.
 - **Comments:** every exported symbol has a doc comment. Package doc
   comments explain the package's role in the system, not just what it is.
 
@@ -89,13 +92,30 @@ where the bug and fix are self-evident.
 Tracked in GitHub issues; this list is just the high-priority ones at
 project genesis:
 
-- [ ] First successful end-to-end build on a real host (sandbox couldn't
-  reach module proxy at generation time).
-- [ ] Verify nftables map atomic replace actually works the way we want
-  on kernel 6.x — write integration test.
+- [x] Verify nftables map atomic replace actually works the way we want
+  on kernel 6.x — `internal/nat/nat_integration_test.go` (build tag
+  `integration`) verifies `Setup`, `SetMap` populate/replace/clear, and
+  the F-19 write-side atomicity (every post-write dump matches the
+  written state across ~50 flips/s). Driven by `test/integration/
+  run.ps1` (Windows) or `run.sh` (Linux/macOS) — privileged Docker
+  container with `--cap-add=NET_ADMIN`. Concurrent userspace dumps can
+  occasionally observe mixed snapshots; that's a kernel multi-message
+  dump quirk, not a dataplane issue (see test doc-comment).
+- [x] Phase-1 integration harness in `test/e2e/` covering boot,
+  nftables setup, discovery, DNAT-map population across all four DHCP
+  scenarios (v4-only, v6-only, both, none). Fully Docker-native:
+  `test/e2e/run.ps1` (Windows) or `test/e2e/up.sh` (Linux/macOS) spawn
+  a runner container that drives `docker compose`. 26/28 assertions
+  green; the 2 fails are a Docker-side macvlan-on-bridge broadcast
+  quirk, not anchord — re-verify v4 lease path on a real Linux host.
+- [ ] Phase-2 e2e: real listener inside the service-anchor namespace
+  + probe container on the lan bridge to validate the inbound DNAT
+  path end-to-end (S-2 source-IP preservation, S-3 restart, S-4 lease
+  rotation, S-5 two-projects, S-6 teardown).
 - [ ] Decide on Prometheus metrics surface (which counters/gauges).
 - [ ] Health endpoint shape (`/healthz` returns what exactly?).
 - [ ] DHCPv6 handling — currently we assume SLAAC is enough for v6.
+  e2e v6-only run confirms SLAAC works through anchord's macvlan child.
 - [ ] Behavior when the VLAN parent interface goes down mid-run.
 
 ## Style notes for human-facing text

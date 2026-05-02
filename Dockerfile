@@ -28,6 +28,7 @@ RUN apk add --no-cache \
         dhclient \
         conntrack-tools \
         iproute2 \
+        nftables \
         ca-certificates \
     && adduser -D -u 65532 -s /sbin/nologin anchord
 

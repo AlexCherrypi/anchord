@@ -130,11 +130,21 @@ func (s *Supervisor) removeLink() {
 // macvlan, and returns when the process exits. -d keeps it foreground;
 // -v gets us log output we can capture; -1 would make it one-shot but
 // we want continuous renewal handling, so we omit it.
+//
+// Hostname is announced to the DHCP server via a generated config file
+// (send host-name "..."). The -H flag is not portable — Alpine's ISC
+// dhclient build does not accept it.
 func (s *Supervisor) runDhclient(ctx context.Context) error {
+	confPath, cleanup, err := s.writeDhclientConf()
+	if err != nil {
+		return fmt.Errorf("write dhclient.conf: %w", err)
+	}
+	defer cleanup()
+
 	args := []string{
-		"-d", // foreground
-		"-v", // verbose
-		"-H", s.hostname,
+		"-d",          // foreground
+		"-v",          // verbose
+		"-cf", confPath,
 		s.ifaceName,
 	}
 	cmd := exec.CommandContext(ctx, "dhclient", args...)
@@ -142,6 +152,31 @@ func (s *Supervisor) runDhclient(ctx context.Context) error {
 	cmd.Stderr = os.Stderr
 	slog.Info("starting dhclient", "iface", s.ifaceName, "hostname", s.hostname)
 	return cmd.Run()
+}
+
+// writeDhclientConf produces a minimal dhclient.conf that asks the
+// server to record our hostname. The returned cleanup removes the
+// temp file on completion.
+func (s *Supervisor) writeDhclientConf() (string, func(), error) {
+	// `send host-name` is the standard ISC dhclient incantation. We
+	// quote the hostname; any embedded `"` or `\` would need escaping
+	// but anchord's hostname comes from project name / env, neither
+	// of which legitimately contains those characters.
+	content := fmt.Sprintf("send host-name \"%s\";\n", s.hostname)
+	f, err := os.CreateTemp("", "anchord-dhclient-*.conf")
+	if err != nil {
+		return "", func() {}, err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", func() {}, err
+	}
+	return f.Name(), func() { _ = os.Remove(f.Name()) }, nil
 }
 
 // watchIP polls the macvlan interface every second and emits whenever
