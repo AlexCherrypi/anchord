@@ -277,31 +277,190 @@ MIT — see [LICENSE](LICENSE).
 ## Test report (auto-generated)
 
 This block is rewritten by `scripts/update-test-report.sh` after a
-green run of the full test suite. The release pipeline rejects any
-tag whose recorded hash does not match the current source — so this
-block is the project's release-readiness signal.
+green run of the full test suite — every test below was observed to
+produce the listed status on the source tree whose hash is recorded
+here. The release pipeline rejects any tag whose recorded hash does
+not match the current source, so this block is the project's
+release-readiness signal.
 
-```
-Last verified: 2026-05-02T19:24:53Z
-Code hash:     sha256:90a6e75f50b55ecfea9dbf4fd8d3dc81b0ceda2cf03eed27fbd0b21b00bd51bb
-Flood fix:     E2E_BRIDGE_FLOOD_FIX=1
+- **Last verified:** 2026-05-02T19:42:25Z
+- **Code hash:** `sha256:36ed106cfd42bfc9f7d51a3b1ae4cda04fde67de84c692fc4716f9b2ea9730fe`
+- **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
-go vet + go test ./...
-ok  	github.com/AlexCherrypi/anchord/cmd/anchord	0.007s
-ok  	github.com/AlexCherrypi/anchord/internal/config	0.005s
-ok  	github.com/AlexCherrypi/anchord/internal/conntrack	0.006s
-ok  	github.com/AlexCherrypi/anchord/internal/dhcp	0.557s
-ok  	github.com/AlexCherrypi/anchord/internal/discovery	0.007s
-ok  	github.com/AlexCherrypi/anchord/internal/labels	0.005s
-ok  	github.com/AlexCherrypi/anchord/internal/nat	0.005s
-ok  	github.com/AlexCherrypi/anchord/internal/reconciler	0.006s
-ok  	github.com/AlexCherrypi/anchord/internal/serviceanchor	0.015s
+### Summary
 
-e2e harness (test/e2e, all four DHCP scenarios)
-  v4-only      14 pass
-  v6-only      14 pass
-  both         16 pass
-  none         10 pass
-  dhcpv6-stateful 16 pass
-```
+| Suite | Pass | Fail | Skip | Total |
+|---|---:|---:|---:|---:|
+| `go vet ./...` | clean | — | — | — |
+| Go unit tests | 82 | 0 | 0 | 82 |
+| E2E (test/e2e, 5 scenarios) | 70 | 0 | — | 70 |
+| **All tests** | **152** | **0** | **0** | **152** |
+
+<details>
+<summary>Go unit tests &mdash; 82/82 passed</summary>
+
+| Package | Test | Status |
+|---|---|:---:|
+| `cmd/anchord` | `TestSelectMode/ANCHORD_MODE=service-anchor` | ✓ |
+| `cmd/anchord` | `TestSelectMode/explicit_network-anchor_subcommand` | ✓ |
+| `cmd/anchord` | `TestSelectMode/flag-only_args_are_ignored` | ✓ |
+| `cmd/anchord` | `TestSelectMode/no_args,_no_env_->_default_network-anchor` | ✓ |
+| `cmd/anchord` | `TestSelectMode/subcommand_wins_over_env` | ✓ |
+| `cmd/anchord` | `TestSelectMode/unknown_env_errors` | ✓ |
+| `cmd/anchord` | `TestSelectMode/unknown_subcommand_errors` | ✓ |
+| `internal/config` | `TestDeriveMAC` | ✓ |
+| `internal/config` | `TestFingerprintDeterministic` | ✓ |
+| `internal/config` | `TestGetenvDefault` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_Defaults` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_Overrides` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_RejectsZeroInterval` | ✓ |
+| `internal/config` | `TestLoad_ComposeProjectFallback` | ✓ |
+| `internal/config` | `TestLoad_DefaultsAndDerivations` | ✓ |
+| `internal/config` | `TestLoad_HostnameOverride` | ✓ |
+| `internal/config` | `TestLoad_MACInvalid` | ✓ |
+| `internal/config` | `TestLoad_MACOverride` | ✓ |
+| `internal/config` | `TestLoad_PollIntervalOverride` | ✓ |
+| `internal/config` | `TestLoad_ProjectOverridesCompose` | ✓ |
+| `internal/config` | `TestLoad_RequiresProject` | ✓ |
+| `internal/config` | `TestLoad_RequiresVLANParent` | ✓ |
+| `internal/config` | `TestParseDuration/duration_string` | ✓ |
+| `internal/config` | `TestParseDuration/empty_uses_default` | ✓ |
+| `internal/config` | `TestParseDuration/invalid` | ✓ |
+| `internal/config` | `TestParseDuration/plain_int_=_seconds` | ✓ |
+| `internal/conntrack` | `TestFlushDestination_NilIPIsNoop` | ✓ |
+| `internal/conntrack` | `TestFlushDestination_NonzeroExitIsSilent` | ✓ |
+| `internal/conntrack` | `TestFlushDestination_V4Command` | ✓ |
+| `internal/conntrack` | `TestFlushDestination_V6Command` | ✓ |
+| `internal/dhcp` | `TestSleepBackoff_CapsAtMax` | ✓ |
+| `internal/dhcp` | `TestSleepBackoff_DoublesBelowCap` | ✓ |
+| `internal/dhcp` | `TestSleepBackoff_RespectsContextCancel` | ✓ |
+| `internal/dhcp` | `TestWriteDhclientConf_Cleanup` | ✓ |
+| `internal/dhcp` | `TestWriteDhclientConf_V4` | ✓ |
+| `internal/dhcp` | `TestWriteDhclientConf_V6` | ✓ |
+| `internal/discovery` | `TestBackendEqual/V6_mode_differs` | ✓ |
+| `internal/discovery` | `TestBackendEqual/different_IPv4` | ✓ |
+| `internal/discovery` | `TestBackendEqual/different_IPv6` | ✓ |
+| `internal/discovery` | `TestBackendEqual/identical` | ✓ |
+| `internal/discovery` | `TestBackendEqual/rules_differ` | ✓ |
+| `internal/discovery` | `TestBackendEqual/rules_different_lengths` | ✓ |
+| `internal/discovery` | `TestBackendEqual/rules_order_swapped` | ✓ |
+| `internal/discovery` | `TestParseIP` | ✓ |
+| `internal/discovery` | `TestPickIPs_NilNetworkSettings` | ✓ |
+| `internal/discovery` | `TestPickIPs_NoSharedFallsBackToFirst` | ✓ |
+| `internal/discovery` | `TestPickIPs_SharedNetworkAbsentReturnsNil` | ✓ |
+| `internal/discovery` | `TestPickIPs_SharedNetworkExplicit` | ✓ |
+| `internal/discovery` | `TestPickIPs_V4Only` | ✓ |
+| `internal/discovery` | `TestPickIPs_V6Only` | ✓ |
+| `internal/discovery` | `TestRuleLess` | ✓ |
+| `internal/discovery` | `TestStateEqual` | ✓ |
+| `internal/discovery` | `TestTrimName` | ✓ |
+| `internal/labels` | `TestParse/absent` | ✓ |
+| `internal/labels` | `TestParse/bad_port` | ✓ |
+| `internal/labels` | `TestParse/bad_proto` | ✓ |
+| `internal/labels` | `TestParse/empty_string_ignored` | ✓ |
+| `internal/labels` | `TestParse/missing_port` | ✓ |
+| `internal/labels` | `TestParse/mixed_protos_with_whitespace` | ✓ |
+| `internal/labels` | `TestParse/port_zero` | ✓ |
+| `internal/labels` | `TestParse/single_tcp` | ✓ |
+| `internal/labels` | `TestParse/v6_off` | ✓ |
+| `internal/nat` | `TestAddressFamily` | ✓ |
+| `internal/nat` | `TestFamilyString` | ✓ |
+| `internal/nat` | `TestIfaceBytes/empty` | ✓ |
+| `internal/nat` | `TestIfaceBytes/short_name_padded` | ✓ |
+| `internal/nat` | `TestIfaceBytes/typical_anchord-ext` | ✓ |
+| `internal/nat` | `TestMapForFamProto` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_DualStack` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_Empty` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_MultipleBackendsAndProtocols` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_SamePortFromTwoBackends` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_V4OnlyBackend` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_V6Off` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_V6OnlyBackend` | ✓ |
+| `internal/serviceanchor` | `TestDefaultRouteFor_Validation` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_InstallsBothFamilies` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_KeepsLastGoodOnLookupError` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_NoOpWhenUnchanged` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_ReplacesOnIPChange` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_RetriesAfterFailedInstall` | ✓ |
+| `internal/serviceanchor` | `TestRun_LoopsAndCleansUp` | ✓ |
+
+</details>
+
+<details>
+<summary>E2E &mdash; 70/70 passed across 5 scenarios</summary>
+
+| Scenario | Assertion | Status |
+|---|---|:---:|
+| `v4-only` | anchord container running | ✓ |
+| `v4-only` | anchord-ext interface present | ✓ |
+| `v4-only` | nftables anchord_v4 table installed | ✓ |
+| `v4-only` | nftables anchord_v6 table installed | ✓ |
+| `v4-only` | anchord-ext has IPv4 from 10.99.0.0/24 | ✓ |
+| `v4-only` | anchord-ext has no fd99:: address | ✓ |
+| `v4-only` | anchord_v4 dnat_tcp contains port 25 | ✓ |
+| `v4-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
+| `v4-only` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
+| `v4-only` | S-3 reachable on tcp/25 after recreate | ✓ |
+| `v4-only` | S-6 anchord exited cleanly (code 0) | ✓ |
+| `v4-only` | S-6 logs show graceful shutdown | ✓ |
+| `v4-only` | S-6 logs show macvlan removed | ✓ |
+| `v4-only` | S-6 nat teardown clean (no warnings) | ✓ |
+| `v6-only` | anchord container running | ✓ |
+| `v6-only` | anchord-ext interface present | ✓ |
+| `v6-only` | nftables anchord_v4 table installed | ✓ |
+| `v6-only` | nftables anchord_v6 table installed | ✓ |
+| `v6-only` | anchord-ext has no IPv4 (10.99.0/24) | ✓ |
+| `v6-only` | anchord-ext has IPv6 from fd99::/64 (RA) | ✓ |
+| `v6-only` | anchord_v6 dnat_tcp contains port 25 | ✓ |
+| `v6-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
+| `v6-only` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
+| `v6-only` | S-3 reachable on tcp/25 after recreate | ✓ |
+| `v6-only` | S-6 anchord exited cleanly (code 0) | ✓ |
+| `v6-only` | S-6 logs show graceful shutdown | ✓ |
+| `v6-only` | S-6 logs show macvlan removed | ✓ |
+| `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
+| `both` | anchord container running | ✓ |
+| `both` | anchord-ext interface present | ✓ |
+| `both` | nftables anchord_v4 table installed | ✓ |
+| `both` | nftables anchord_v6 table installed | ✓ |
+| `both` | anchord-ext has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | anchord-ext has IPv6 from fd99::/64 (RA) | ✓ |
+| `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
+| `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
+| `both` | S-2 (v4) source IP preserved through DNAT | ✓ |
+| `both` | S-2 (v6) source IP preserved through DNAT | ✓ |
+| `both` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
+| `both` | S-3 reachable on tcp/25 after recreate | ✓ |
+| `both` | S-6 anchord exited cleanly (code 0) | ✓ |
+| `both` | S-6 logs show graceful shutdown | ✓ |
+| `both` | S-6 logs show macvlan removed | ✓ |
+| `both` | S-6 nat teardown clean (no warnings) | ✓ |
+| `none` | anchord container running | ✓ |
+| `none` | anchord-ext interface present | ✓ |
+| `none` | nftables anchord_v4 table installed | ✓ |
+| `none` | nftables anchord_v6 table installed | ✓ |
+| `none` | anchord-ext has no IPv4 lease (expected) | ✓ |
+| `none` | anchord-ext has no IPv6 (expected) | ✓ |
+| `none` | S-6 anchord exited cleanly (code 0) | ✓ |
+| `none` | S-6 logs show graceful shutdown | ✓ |
+| `none` | S-6 logs show macvlan removed | ✓ |
+| `none` | S-6 nat teardown clean (no warnings) | ✓ |
+| `dhcpv6-stateful` | anchord container running | ✓ |
+| `dhcpv6-stateful` | anchord-ext interface present | ✓ |
+| `dhcpv6-stateful` | nftables anchord_v4 table installed | ✓ |
+| `dhcpv6-stateful` | nftables anchord_v6 table installed | ✓ |
+| `dhcpv6-stateful` | anchord-ext has IPv4 from 10.99.0.0/24 | ✓ |
+| `dhcpv6-stateful` | anchord-ext has IPv6 from fd99::/64 (DHCPv6) | ✓ |
+| `dhcpv6-stateful` | anchord_v4 dnat_tcp contains port 25 | ✓ |
+| `dhcpv6-stateful` | anchord_v6 dnat_tcp contains port 25 | ✓ |
+| `dhcpv6-stateful` | S-2 (v4) source IP preserved through DNAT | ✓ |
+| `dhcpv6-stateful` | S-2 (v6) source IP preserved through DNAT | ✓ |
+| `dhcpv6-stateful` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
+| `dhcpv6-stateful` | S-3 reachable on tcp/25 after recreate | ✓ |
+| `dhcpv6-stateful` | S-6 anchord exited cleanly (code 0) | ✓ |
+| `dhcpv6-stateful` | S-6 logs show graceful shutdown | ✓ |
+| `dhcpv6-stateful` | S-6 logs show macvlan removed | ✓ |
+| `dhcpv6-stateful` | S-6 nat teardown clean (no warnings) | ✓ |
+
+</details>
 <!-- TEST-REPORT-END -->

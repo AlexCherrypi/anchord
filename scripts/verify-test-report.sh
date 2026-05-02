@@ -16,7 +16,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 current=$(scripts/code-hash.sh)
-recorded=$(awk '/^Code hash: */ { print $3; exit }' README.md 2>/dev/null || true)
+# Extract "sha256:<hex>" from the auto-generated TEST-REPORT block.
+# The hash is rendered as `- **Code hash:** \`sha256:...\`` in the
+# tabular markdown report; we tolerate optional formatting
+# decoration around it.
+recorded=$(grep -oE 'sha256:[0-9a-f]{64}' README.md 2>/dev/null | head -n1 || true)
 
 if [ "$current" = "$recorded" ]; then
     echo "Test report is current ($current)"
