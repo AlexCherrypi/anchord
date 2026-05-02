@@ -7,6 +7,10 @@
 
 > One IP per Compose project. No subnet bookkeeping. Real client source IPs.
 
+**Built for self-hosted, homelab, and small-fleet workloads** that want
+classical "one server, one service" semantics — Mailcow, Nextcloud,
+Matrix/Synapse, Gitea, anything that historically ran on its own box.
+
 `anchord` is a per-project network anchor for Docker Compose. It gives a Compose
 project a single externally-routable IP (via macvlan + DHCP, with hostname
 announcement) and dynamically maintains nftables DNAT rules pointing at
