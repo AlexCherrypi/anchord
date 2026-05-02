@@ -23,8 +23,16 @@ on another, and so on — but with the operational ergonomics of Compose.
 
 ## Status
 
-**Pre-alpha.** Designed in a bathtub conversation. Use as a starting point, not
-in production.
+**Pre-alpha, but it works.** Both modes implemented. 152/152 across unit
+tests + e2e covering all four DHCP scenarios plus stateful DHCPv6 (the
+auto-generated report at the bottom of this README is the release-readiness
+signal). Outstanding before a v1 tag: real-host validation on a Linux box
+with a physical VLAN sub-interface, plus SPEC decisions on the metrics
+surface and the health-endpoint shape. Use as a starting point, not in
+production.
+
+*(Designed in a bathtub conversation. Has held up better than that has any
+right to.)*
 
 ## The mental model
 
