@@ -18,27 +18,32 @@ before writing code. Don't quietly route around the design.
 
 ## Project status
 
-Pre-alpha. The skeleton compiles end-to-end: `go vet ./...`,
-`go build ./...`, `go test ./...` and `docker build` all pass clean as
-of 2026-05-02. The `nftables` v0.2.0 API matched what the code already
-expected, no fixes required.
+Pre-alpha. Functional surface as of 2026-05-02:
 
-Phase-2 e2e (2026-05-02) found and fixed two F-20 violations:
-`main` treated `context.Canceled` as fatal (exit 1 on SIGTERM) and
-the dhcp goroutine wasn't awaited (`defer s.removeLink()` could miss
-container shutdown). Both fixed.
+- Network-anchor and service-anchor modes both implemented and
+  tested. Single binary, `ANCHORD_MODE=network-anchor` (default) or
+  `ANCHORD_MODE=service-anchor` (or `command: [service-anchor]`).
+- Phase-2 e2e harness lands at 54/54 across all four DHCP scenarios
+  on Docker Desktop with `E2E_BRIDGE_FLOOD_FIX=1` (a one-shot
+  `bridge-nf-call-iptables=0` host-wide tweak that's only needed on
+  Docker Desktop's WSL2 bridge — production Linux hosts don't need
+  it). Without the flag: 50/54, the 4 deltas are exactly the v4 DHCP
+  path the workaround unlocks.
+- Two F-20 fixes landed on the way: `main` no longer treats
+  `context.Canceled` as fatal (exit 1 on SIGTERM was wrong), and the
+  dhcp goroutine is now awaited via `WaitGroup` so its deferred
+  `removeLink` actually runs to completion before main returns.
+- Test-report machinery: `scripts/code-hash.sh` produces a
+  deterministic SHA-256 over `*.go`, `go.mod`/`go.sum`, `Dockerfile`,
+  `test/`, `scripts/`. `scripts/update-test-report.sh` self-execs in
+  Docker, runs everything, only writes README's TEST-REPORT block on
+  green. `.github/workflows/release-gate.yml` blocks any `v*` tag
+  whose tagged commit is either off-main or whose recorded hash is
+  stale.
 
-Phase-2 also surfaced a deeper architectural finding: service-anchors
-on `internal: true` Docker bridges have no default route, so response
-packets to LAN-side clients drop silently. The design response is
-**service-anchor mode** — same `anchord` binary, run with
-`ANCHORD_MODE=service-anchor`, resolves the network-anchor via Docker
-DNS and maintains the default route. SPEC §2.6, ARCHITECTURE role 2,
-and CONTEXT all updated 2026-05-02; implementation pending.
-
-Next gaps: ship service-anchor mode (and update the e2e harness to
-use it so Phase-2 goes green), then real-host validation against an
-actual VLAN/DHCP server.
+Next gaps: see "Open questions / future work" below. Highest leverage
+for v1.0 readiness is real-host validation; the rest are SPEC-level
+decisions (metrics, health, DHCPv6).
 
 ## Code conventions
 
@@ -124,24 +129,42 @@ project genesis:
   a runner container that drives `docker compose`. 26/28 assertions
   green; the 2 fails are a Docker-side macvlan-on-bridge broadcast
   quirk, not anchord — re-verify v4 lease path on a real Linux host.
-- [~] Phase-2 e2e: real listener inside the service-anchor namespace
-  + probe container on the lan bridge. Harness in place
-  (`test/e2e/images/tcp-echo`, `test/e2e/images/probe`, S-2/S-3/S-6
-  assertions in `run.sh`). Currently 12/15 green on Docker Desktop
-  with a fresh anchord skeleton; the 3 fails are: (a) v4 DHCP
-  (env-known macvlan-on-bridge quirk), (b) S-2/S-3 inbound timeout
-  caused by the missing service-anchor default route — tracked under
-  service-anchor mode (next item). Re-verify once that lands.
-- [ ] Implement service-anchor mode (SPEC §2.6, ARCHITECTURE role 2):
-  `cmd/anchord` dispatch on `ANCHORD_MODE`, new
-  `internal/serviceanchor` package, env-var contract per SPEC F-24..F-29,
-  e2e compose wired to use it for `smtp-anchor`. Then Phase-2 should
-  go green.
+- [x] Phase-2 e2e: real listener inside the service-anchor namespace
+  + probe container on the lan bridge, S-2/S-3/S-6 assertions in
+  `run.sh`. Lands at 54/54 green on Docker Desktop with the opt-in
+  `E2E_BRIDGE_FLOOD_FIX=1` (sets `bridge-nf-call-iptables=0` to undo
+  Docker's default iptables-FORWARD drop of bridge broadcasts), and
+  50/54 without — the 4 deltas are exactly the v4 DHCP path that
+  needs that workaround. Real Linux hosts don't need the flag (see
+  next item).
+- [x] Implement service-anchor mode (SPEC §2.6, ARCHITECTURE role 2):
+  `cmd/anchord` dispatches on `ANCHORD_MODE`, `internal/serviceanchor`
+  package, F-24..F-29 contract honoured, e2e compose's smtp-anchor
+  uses it. Done.
+- [x] Code-hash test-report system + release gate:
+  `scripts/{code-hash,update-test-report,verify-test-report}.{sh,ps1}`,
+  `.github/workflows/{ci,release-gate}.yml`. README's
+  auto-generated TEST-REPORT block is the release-readiness signal;
+  release gate blocks tags that aren't on main or whose recorded
+  hash is stale.
+- [ ] Real-host validation: run the e2e harness on an actual Linux
+  host with a physical VLAN sub-interface and confirm 54/54 without
+  `E2E_BRIDGE_FLOOD_FIX`. Closes the env-quirk caveat for good.
 - [ ] Decide on Prometheus metrics surface (which counters/gauges).
+  Likely candidates: reconcile latency, DHCP lease age, dnat_tcp/udp
+  map size, conntrack flushes, dhclient restart count. Needs a SPEC
+  decision before implementation.
 - [ ] Health endpoint shape (`/healthz` returns what exactly?).
+  Liveness vs. readiness; what counts as "ready" — tables installed?
+  first lease? first reconcile? Needs a SPEC decision.
 - [ ] DHCPv6 handling — currently we assume SLAAC is enough for v6.
   e2e v6-only run confirms SLAAC works through anchord's macvlan child.
+  DHCPv6 (e.g. for hostname-announcement on v6) is not implemented;
+  decision pending: ship in v0.1 or defer.
 - [ ] Behavior when the VLAN parent interface goes down mid-run.
+  Today: dhclient dies, the supervisor backs off and retries; macvlan
+  re-creation after parent recovery is untested. Worth a smoke test
+  + maybe a small explicit re-attach.
 
 ## Style notes for human-facing text
 
