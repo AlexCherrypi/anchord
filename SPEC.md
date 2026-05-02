@@ -50,6 +50,9 @@ several containers", that's a bug.
   externally with the same source IP (v4 and, where applicable, v6).
 - **F-13** Egress source IP automatically tracks the current DHCP lease —
   no reconfiguration needed on lease change.
+- **F-13a** Egress works on `internal: true` Docker bridges (which carry
+  no default route) without the operator pinning the network-anchor's
+  transit IP or writing routing logic in compose `command:` strings.
 
 ### 2.4 Service discovery and reconciliation
 
@@ -73,9 +76,37 @@ several containers", that's a bug.
   tables and macvlan child interface.
 - **F-21** All log output is structured JSON to stdout.
 - **F-22** All configuration is via environment variables. No config files.
-- **F-23** anchord runs as a single container, requiring only `CAP_NET_ADMIN`
-  and access to a Docker socket (read-only via socket-proxy is the
-  documented default).
+- **F-23** The network-anchor runs as a single container, requiring only
+  `CAP_NET_ADMIN` and access to a Docker socket (read-only via socket-proxy
+  is the documented default).
+
+### 2.6 Service-anchor mode
+
+The same `anchord` binary, invoked with `ANCHORD_MODE=service-anchor`
+(or equivalently `command: [service-anchor]`), runs in service-anchor
+mode. This mode is what makes egress and inbound-response paths work
+on `internal: true` Docker bridges (see F-13a).
+
+- **F-24** Service-anchor mode resolves the network-anchor's hostname
+  (`anchord` by default; configurable via `ANCHORD_GATEWAY_HOSTNAME`)
+  via the project's Docker DNS.
+- **F-25** On startup, service-anchor mode installs a default route in
+  its own network namespace via the resolved address — for v4, v6, or
+  both, depending on which families resolve. If neither resolves at
+  startup, it retries with backoff and does not exit.
+- **F-26** Service-anchor mode re-resolves on a configurable cadence
+  (default 5 s, `ANCHORD_GATEWAY_RESOLVE_INTERVAL`) and replaces its
+  installed default route atomically (netlink `RouteReplace`) when the
+  resolved address changes. Existing non-default routes in the namespace
+  are not touched.
+- **F-27** Service-anchor mode requires `CAP_NET_ADMIN` and read-only
+  access to the Docker DNS resolver (i.e., normal Compose-network
+  membership). It does **not** need access to the Docker socket.
+- **F-28** Service-anchor mode keeps the namespace alive for the
+  lifetime of the loop — it is the namespace owner that application
+  containers join via `network_mode: service:<anchor>`.
+- **F-29** On SIGTERM/SIGINT, service-anchor mode removes the default
+  route(s) it installed and exits cleanly.
 
 ## 3. Non-functional requirements
 
@@ -160,3 +191,12 @@ These are the integration tests that, when all green, signal v1.0.
 2. Service-anchor labelled `tcp/443` without v6 override.
 3. Connections on v4:443 and v6:443 both succeed and reach the same
    container.
+
+### S-9: Network-anchor recreate
+1. Project is running, service-anchors reachable.
+2. `docker compose up -d --force-recreate anchord` — Docker IPAM may
+   hand the network-anchor a different transit IP.
+3. Within `ANCHORD_GATEWAY_RESOLVE_INTERVAL` + 1 s, every
+   service-anchor's default route is updated to the new transit IP.
+4. Inbound and outbound paths work without restarting any
+   service-anchor or application container.

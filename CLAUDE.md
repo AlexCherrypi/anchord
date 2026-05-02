@@ -23,12 +23,28 @@ Pre-alpha. The skeleton compiles end-to-end: `go vet ./...`,
 of 2026-05-02. The `nftables` v0.2.0 API matched what the code already
 expected, no fixes required.
 
-Next gaps are real-host validation against an actual VLAN/DHCP server
-and the integration test harness — see Open questions below.
+Phase-2 e2e (2026-05-02) found and fixed two F-20 violations:
+`main` treated `context.Canceled` as fatal (exit 1 on SIGTERM) and
+the dhcp goroutine wasn't awaited (`defer s.removeLink()` could miss
+container shutdown). Both fixed.
+
+Phase-2 also surfaced a deeper architectural finding: service-anchors
+on `internal: true` Docker bridges have no default route, so response
+packets to LAN-side clients drop silently. The design response is
+**service-anchor mode** — same `anchord` binary, run with
+`ANCHORD_MODE=service-anchor`, resolves the network-anchor via Docker
+DNS and maintains the default route. SPEC §2.6, ARCHITECTURE role 2,
+and CONTEXT all updated 2026-05-02; implementation pending.
+
+Next gaps: ship service-anchor mode (and update the e2e harness to
+use it so Phase-2 goes green), then real-host validation against an
+actual VLAN/DHCP server.
 
 ## Code conventions
 
-- **Package layout:** `cmd/anchord` is the only binary entry point.
+- **Package layout:** `cmd/anchord` is the only binary entry point;
+  it dispatches on `ANCHORD_MODE` (or first non-flag argument) into
+  either the network-anchor or service-anchor code paths.
   `internal/*` packages are leaf-shaped; `reconciler` is the only one
   that depends on multiple others.
 - **Logging:** `log/slog` only, JSON handler, structured key/value pairs.
@@ -108,10 +124,19 @@ project genesis:
   a runner container that drives `docker compose`. 26/28 assertions
   green; the 2 fails are a Docker-side macvlan-on-bridge broadcast
   quirk, not anchord — re-verify v4 lease path on a real Linux host.
-- [ ] Phase-2 e2e: real listener inside the service-anchor namespace
-  + probe container on the lan bridge to validate the inbound DNAT
-  path end-to-end (S-2 source-IP preservation, S-3 restart, S-4 lease
-  rotation, S-5 two-projects, S-6 teardown).
+- [~] Phase-2 e2e: real listener inside the service-anchor namespace
+  + probe container on the lan bridge. Harness in place
+  (`test/e2e/images/tcp-echo`, `test/e2e/images/probe`, S-2/S-3/S-6
+  assertions in `run.sh`). Currently 12/15 green on Docker Desktop
+  with a fresh anchord skeleton; the 3 fails are: (a) v4 DHCP
+  (env-known macvlan-on-bridge quirk), (b) S-2/S-3 inbound timeout
+  caused by the missing service-anchor default route — tracked under
+  service-anchor mode (next item). Re-verify once that lands.
+- [ ] Implement service-anchor mode (SPEC §2.6, ARCHITECTURE role 2):
+  `cmd/anchord` dispatch on `ANCHORD_MODE`, new
+  `internal/serviceanchor` package, env-var contract per SPEC F-24..F-29,
+  e2e compose wired to use it for `smtp-anchor`. Then Phase-2 should
+  go green.
 - [ ] Decide on Prometheus metrics surface (which counters/gauges).
 - [ ] Health endpoint shape (`/healthz` returns what exactly?).
 - [ ] DHCPv6 handling — currently we assume SLAAC is enough for v6.

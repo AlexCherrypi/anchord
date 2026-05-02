@@ -60,26 +60,42 @@ in the same project is undefined behavior.
 
 ### 2. Service-anchors (zero or more per project)
 
-A service-anchor is a small placeholder container — usually
-`alpine + sleep infinity` — that exists for one reason: to be a stable
-**network namespace** that one or more "real" application containers
-can share.
+A service-anchor is a small container that exists for two reasons:
+to be a stable **network namespace** that one or more "real"
+application containers can share, and to maintain that namespace's
+default route to the network-anchor so traffic can actually flow.
 
-A service-anchor is identified by carrying the `anchord.expose` label.
-Example:
+A service-anchor runs the **same anchord binary** as the network-anchor,
+in service-anchor mode (selected via `ANCHORD_MODE=service-anchor`,
+or equivalently `command: [service-anchor]` as a convenience that
+sets the same env var):
 
 ```yaml
 smtp-anchor:
-  image: alpine
-  command: [sleep, infinity]
+  image: ghcr.io/alexcherrypi/anchord:latest
+  cap_add: [NET_ADMIN]
   networks: [transit, backend]
+  environment:
+    ANCHORD_MODE: service-anchor
   labels:
     anchord.expose: "tcp/25,tcp/465,tcp/587"
 ```
 
 This declares: "any inbound traffic to the project's public IP on
 ports 25, 465 or 587 should land in *this* container's network
-namespace."
+namespace." Service-anchor mode resolves the network-anchor's
+hostname (`anchord` by default) via Docker DNS, installs a default
+route via that address (v4 and/or v6, whichever resolves), and keeps
+that route current as the network-anchor's IP changes across recreates.
+
+**Why a helper at all?** `internal: true` Docker bridges (which we
+need, see "Hard-to-misread traps" below) ship without a default route.
+Without one, the service-anchor's kernel has no path back to the
+LAN-side client — return traffic for an inbound connection drops
+silently with "no route to host", and outbound traffic can't leave
+the project at all. The service-anchor mode is the smallest mechanism
+that fills this gap without forcing the operator to pin IPs or to
+write routing logic in compose `command:` strings.
 
 The actual application — postfix, in this example — does not get the
 label. It joins the service-anchor's namespace via:
@@ -138,6 +154,15 @@ LAN client ──tcp:25──▶ DHCP-assigned IP on VLAN
                             - src: the LAN client's real IP, untouched
 ```
 
+The response packet retraces the same hops in reverse: postfix writes
+to the socket, kernel emits `src=transit-IP, dst=LAN-client-IP`. Because
+the service-anchor's default route points at anchord (installed by the
+service-anchor mode helper), the response goes back through the
+transit bridge to anchord's netns. There conntrack reverses the
+prerouting DNAT — `src` is rewritten back to anchord-ext's address —
+and the packet leaves through the macvlan child onto the VLAN. The
+LAN client sees a normal TCP reply from the project's public IP.
+
 Critical property: **no MASQUERADE on this path**. Postfix sees the
 real client source IP because we never rewrote it. This is what makes
 spam scoring, audit logs, IP allowlists work correctly.
@@ -148,7 +173,7 @@ spam scoring, audit logs, IP allowlists work correctly.
 postfix ──▶ smtp-anchor's network stack
               │
               ▼
-        default route via transit bridge
+        default route via anchord (installed by service-anchor mode)
               │
               ▼
         anchord container, transit interface
@@ -218,14 +243,27 @@ The control loop:
    (sub-second latency). A polling fallback every 30 seconds catches
    anything missed.
 
+A second, much smaller loop runs inside each service-anchor (anchord
+in service-anchor mode):
+
+1. **Resolve** — Docker DNS lookup for the network-anchor's hostname
+   (`anchord` by default), v4 + v6.
+2. **Reconcile route** — install or replace the default route in the
+   service-anchor's own netns to point at whichever address resolved.
+   Uses netlink `RouteReplace` so the swap is atomic.
+3. **Re-resolve every 5s** — picks up changes when the network-anchor
+   is recreated and Docker hands it a different transit IP. No Docker
+   socket access needed; this loop only touches its own routing table.
+
 What anchord does NOT do:
 
-- It does not configure the service-anchors. They're plain Compose
-  services; their `networks` and `labels` are written by the user.
 - It does not configure the application containers. They use
   `network_mode: service:<anchor>` like in any pod-pattern setup.
-- It does not touch routing tables, except its own egress masquerade.
-- It does not parse TLS, hostnames, HTTP, or anything above layer 4.
+- The network-anchor never touches the service-anchors' routing
+  tables — each service-anchor maintains its own default route via
+  the service-anchor mode loop running inside it.
+- The network-anchor does not parse TLS, hostnames, HTTP, or anything
+  above layer 4.
 
 ## What the user writes vs. what anchord generates
 
@@ -243,8 +281,10 @@ services:
     networks: [transit]
 
   smtp-anchor:
-    image: alpine
-    command: [sleep, infinity]
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add: [NET_ADMIN]
+    environment:
+      ANCHORD_MODE: service-anchor
     networks: [transit, backend]
     labels:
       anchord.expose: "tcp/25,tcp/465,tcp/587"
@@ -300,7 +340,10 @@ A few traps that catch reviewers, contributors, and AI agents:
    `internal: true`.** Transit (anchor↔anchor) and backend (anchor↔db).
    Marking them internal disables Docker's default-gateway-based
    masquerade — which is what we want, because anchord owns the
-   masquerade rule and Docker's would conflict.
+   masquerade rule and Docker's would conflict. The price of `internal:
+   true` is that Docker doesn't install a default route on those
+   bridges either; the service-anchor mode helper exists to fill that
+   gap (see role 2 above).
 5. **The service-anchor has the label, the application doesn't.** If
    you put `anchord.expose` on postfix instead of on smtp-anchor,
    anchord can find postfix but postfix has no IP on the transit

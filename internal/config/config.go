@@ -3,6 +3,11 @@
 // All anchord configuration is environment-based by design — there is no
 // config file. This keeps the operational surface tiny and makes it easy
 // to drop the same compose snippet into many projects.
+//
+// The same binary runs in two modes — see SPEC §2.6 — selected by
+// ANCHORD_MODE (or the first non-flag CLI argument). Each mode has its
+// own loader (LoadNetworkAnchor / LoadServiceAnchor) so that mode-irrelevant
+// env vars don't show up as required errors when running the other mode.
 package config
 
 import (
@@ -15,8 +20,8 @@ import (
 	"time"
 )
 
-// Config holds resolved anchord settings.
-type Config struct {
+// NetworkAnchor holds resolved settings for the network-anchor mode.
+type NetworkAnchor struct {
 	// ComposeProject scopes which containers anchord watches.
 	// Required. Usually injected as ${COMPOSE_PROJECT_NAME}.
 	ComposeProject string
@@ -52,9 +57,23 @@ type Config struct {
 	LogLevel string
 }
 
-// Load reads configuration from the environment.
-func Load() (*Config, error) {
-	c := &Config{
+// ServiceAnchor holds resolved settings for the service-anchor mode.
+type ServiceAnchor struct {
+	// GatewayHostname is the Docker-DNS name to look up for the
+	// network-anchor's transit IP. Default "anchord".
+	GatewayHostname string
+
+	// ResolveInterval is how often the service-anchor mode re-resolves
+	// the gateway hostname and reconciles its default route.
+	ResolveInterval time.Duration
+
+	// LogLevel: debug, info, warn, error.
+	LogLevel string
+}
+
+// LoadNetworkAnchor reads network-anchor configuration from the environment.
+func LoadNetworkAnchor() (*NetworkAnchor, error) {
+	c := &NetworkAnchor{
 		ComposeProject: os.Getenv("ANCHORD_PROJECT"),
 		VLANParent:     os.Getenv("ANCHORD_VLAN_PARENT"),
 		ExtIfaceName:   getenvDefault("ANCHORD_EXT_IFACE", "anchord-ext"),
@@ -101,6 +120,23 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+// LoadServiceAnchor reads service-anchor configuration from the environment.
+func LoadServiceAnchor() (*ServiceAnchor, error) {
+	c := &ServiceAnchor{
+		GatewayHostname: getenvDefault("ANCHORD_GATEWAY_HOSTNAME", "anchord"),
+		LogLevel:        getenvDefault("ANCHORD_LOG_LEVEL", "info"),
+	}
+	var err error
+	c.ResolveInterval, err = parseDuration("ANCHORD_GATEWAY_RESOLVE_INTERVAL", 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if c.ResolveInterval <= 0 {
+		return nil, fmt.Errorf("ANCHORD_GATEWAY_RESOLVE_INTERVAL must be positive")
+	}
+	return c, nil
+}
+
 // deriveMAC produces a stable locally-administered unicast MAC from a
 // project name. Locally administered = bit 1 of first octet set, unicast
 // = bit 0 cleared. We use the OUI 02:42:xx, which Docker also uses for
@@ -138,12 +174,12 @@ func parseDuration(key string, def time.Duration) (time.Duration, error) {
 }
 
 // MACString returns the configured MAC in standard colon-hex form.
-func (c *Config) MACString() string {
+func (c *NetworkAnchor) MACString() string {
 	return c.ExtMAC.String()
 }
 
 // Fingerprint returns a short identifier suitable for log lines.
-func (c *Config) Fingerprint() string {
+func (c *NetworkAnchor) Fingerprint() string {
 	h := sha256.Sum256([]byte(c.ComposeProject + c.VLANParent))
 	return hex.EncodeToString(h[:4])
 }

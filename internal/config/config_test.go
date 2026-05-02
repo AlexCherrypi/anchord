@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// clearAnchordEnv blanks every env var Load() consults so each test
+// clearAnchordEnv blanks every env var LoadNetworkAnchor() consults so each test
 // starts from a deterministic baseline. Empty string and "unset" are
-// equivalent for Load() because every check is `os.Getenv(...) == ""`.
+// equivalent for LoadNetworkAnchor() because every check is `os.Getenv(...) == ""`.
 func clearAnchordEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
@@ -47,7 +47,7 @@ func TestDeriveMAC(t *testing.T) {
 
 func TestLoad_RequiresProject(t *testing.T) {
 	clearAnchordEnv(t)
-	_, err := Load()
+	_, err := LoadNetworkAnchor()
 	if err == nil || !strings.Contains(err.Error(), "ANCHORD_PROJECT") {
 		t.Fatalf("expected error mentioning ANCHORD_PROJECT, got: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestLoad_RequiresProject(t *testing.T) {
 func TestLoad_RequiresVLANParent(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	_, err := Load()
+	_, err := LoadNetworkAnchor()
 	if err == nil || !strings.Contains(err.Error(), "ANCHORD_VLAN_PARENT") {
 		t.Fatalf("expected error mentioning ANCHORD_VLAN_PARENT, got: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestLoad_ComposeProjectFallback(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("COMPOSE_PROJECT_NAME", "from-compose")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
-	cfg, err := Load()
+	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestLoad_ProjectOverridesCompose(t *testing.T) {
 	t.Setenv("ANCHORD_PROJECT", "explicit")
 	t.Setenv("COMPOSE_PROJECT_NAME", "from-compose")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
-	cfg, err := Load()
+	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestLoad_DefaultsAndDerivations(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
-	cfg, err := Load()
+	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestLoad_HostnameOverride(t *testing.T) {
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	t.Setenv("ANCHORD_DHCP_HOSTNAME", "mail.example.com")
-	cfg, err := Load()
+	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestLoad_MACOverride(t *testing.T) {
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	t.Setenv("ANCHORD_EXT_MAC", "aa:bb:cc:dd:ee:ff")
-	cfg, err := Load()
+	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestLoad_MACInvalid(t *testing.T) {
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	t.Setenv("ANCHORD_EXT_MAC", "not-a-mac")
-	_, err := Load()
+	_, err := LoadNetworkAnchor()
 	if err == nil || !strings.Contains(err.Error(), "ANCHORD_EXT_MAC") {
 		t.Errorf("expected error mentioning ANCHORD_EXT_MAC, got: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestLoad_PollIntervalOverride(t *testing.T) {
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
 	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	t.Setenv("ANCHORD_POLL_INTERVAL", "5s")
-	cfg, err := Load()
+	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -211,11 +211,60 @@ func TestGetenvDefault(t *testing.T) {
 	}
 }
 
+func TestLoadServiceAnchor_Defaults(t *testing.T) {
+	for _, k := range []string{
+		"ANCHORD_GATEWAY_HOSTNAME", "ANCHORD_GATEWAY_RESOLVE_INTERVAL",
+		"ANCHORD_LOG_LEVEL",
+	} {
+		t.Setenv(k, "")
+	}
+	cfg, err := LoadServiceAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.GatewayHostname != "anchord" {
+		t.Errorf("GatewayHostname default: %q", cfg.GatewayHostname)
+	}
+	if cfg.ResolveInterval != 5*time.Second {
+		t.Errorf("ResolveInterval default: %s", cfg.ResolveInterval)
+	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("LogLevel default: %q", cfg.LogLevel)
+	}
+}
+
+func TestLoadServiceAnchor_Overrides(t *testing.T) {
+	t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "router")
+	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "2s")
+	t.Setenv("ANCHORD_LOG_LEVEL", "debug")
+	cfg, err := LoadServiceAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.GatewayHostname != "router" {
+		t.Errorf("hostname: %q", cfg.GatewayHostname)
+	}
+	if cfg.ResolveInterval != 2*time.Second {
+		t.Errorf("interval: %s", cfg.ResolveInterval)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("level: %q", cfg.LogLevel)
+	}
+}
+
+func TestLoadServiceAnchor_RejectsZeroInterval(t *testing.T) {
+	t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
+	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "0")
+	if _, err := LoadServiceAnchor(); err == nil {
+		t.Fatal("expected error for zero interval")
+	}
+}
+
 func TestFingerprintDeterministic(t *testing.T) {
-	c1 := &Config{ComposeProject: "mailcow", VLANParent: "eth0.42"}
-	c2 := &Config{ComposeProject: "mailcow", VLANParent: "eth0.42"}
-	c3 := &Config{ComposeProject: "mailcow", VLANParent: "eth0.99"}
-	c4 := &Config{ComposeProject: "nextcloud", VLANParent: "eth0.42"}
+	c1 := &NetworkAnchor{ComposeProject: "mailcow", VLANParent: "eth0.42"}
+	c2 := &NetworkAnchor{ComposeProject: "mailcow", VLANParent: "eth0.42"}
+	c3 := &NetworkAnchor{ComposeProject: "mailcow", VLANParent: "eth0.99"}
+	c4 := &NetworkAnchor{ComposeProject: "nextcloud", VLANParent: "eth0.42"}
 	if c1.Fingerprint() != c2.Fingerprint() {
 		t.Errorf("fingerprint not deterministic")
 	}

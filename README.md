@@ -81,8 +81,10 @@ services:
     networks: [transit]
 
   smtp-anchor:
-    image: alpine
-    command: [sleep, infinity]
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add: [NET_ADMIN]
+    environment:
+      ANCHORD_MODE: service-anchor
     networks: [transit, backend]
     labels:
       anchord.expose: "tcp/25,tcp/465,tcp/587"
@@ -97,6 +99,21 @@ the docker socket, finds containers in the same compose project that carry the
 `anchord.expose` label, and wires up nftables DNAT entries pointing at their
 current bridge-network IPs. When containers restart and get new IPs, the maps
 update atomically and stale conntrack entries are flushed.
+
+### One image, two modes
+
+The `anchord` image plays two roles in a project:
+
+- **Network-anchor** (`ANCHORD_MODE=network-anchor`, the default). One per
+  project. Owns the macvlan child, runs the DHCP client, and maintains the
+  nftables NAT state.
+- **Service-anchor** (`ANCHORD_MODE=service-anchor`). One per exposed service.
+  Resolves the network-anchor via Docker DNS, installs and maintains a default
+  route via it, and serves as the namespace owner that real application
+  containers join via `network_mode: service:<anchor>`.
+
+Both roles run the same binary; the mode is just an env var. As an alternative
+spelling, `command: [service-anchor]` does the same as setting `ANCHORD_MODE`.
 
 ## Architecture
 
@@ -164,7 +181,16 @@ arrives at the service-anchor with the original client IP intact.
 
 ## Configuration
 
-All via environment variables on the anchord container.
+All via environment variables.
+
+### Common (both modes)
+
+| Variable                     | Required | Default            | Notes |
+|------------------------------|----------|--------------------|-------|
+| `ANCHORD_MODE`               | no       | `network-anchor`   | `network-anchor` or `service-anchor`. `command: [service-anchor]` is an equivalent override. |
+| `ANCHORD_LOG_LEVEL`          | no       | `info`             | `debug`/`info`/`warn`/`error` |
+
+### Network-anchor mode
 
 | Variable                     | Required | Default            | Notes |
 |------------------------------|----------|--------------------|-------|
@@ -175,8 +201,14 @@ All via environment variables on the anchord container.
 | `ANCHORD_EXT_IFACE`          | no       | `anchord-ext`      | macvlan child interface name |
 | `ANCHORD_POLL_INTERVAL`      | no       | `30s`              | Safety-net reconcile cadence |
 | `ANCHORD_DHCP_BACKOFF_MAX`   | no       | `5m`               | Max backoff between dhclient retries |
-| `ANCHORD_LOG_LEVEL`          | no       | `info`             | `debug`/`info`/`warn`/`error` |
 | `DOCKER_HOST`                | no       | unix socket        | Set to `tcp://docker-proxy:2375` for socket-proxy mode |
+
+### Service-anchor mode
+
+| Variable                            | Required | Default   | Notes |
+|-------------------------------------|----------|-----------|-------|
+| `ANCHORD_GATEWAY_HOSTNAME`          | no       | `anchord` | Compose-network DNS name to look up for the network-anchor's transit IP |
+| `ANCHORD_GATEWAY_RESOLVE_INTERVAL`  | no       | `5s`      | How often the service-anchor re-resolves and reconciles its default route |
 
 ## Container labels
 
@@ -200,12 +232,17 @@ docker build -t anchord:dev .
 ## Caveats and known limitations
 
 - **Kernel ≥ 4.18** required for atomic nftables map replaces.
-- **CAP_NET_ADMIN** is required. anchord must run privileged-enough to manage
-  netlink and create the macvlan child.
+- **CAP_NET_ADMIN** is required on every anchord container — the
+  network-anchor for macvlan + nftables, every service-anchor for
+  managing its own default route via netlink.
+- **The service-anchor's DNS name must match `ANCHORD_GATEWAY_HOSTNAME`.**
+  Default is `anchord`, which matches the canonical service name in the
+  example compose. If you rename the network-anchor service, set
+  `ANCHORD_GATEWAY_HOSTNAME` on each service-anchor to match.
 - **Host ↔ project access** does not work over the macvlan from the docker
   host itself (Linux kernel quirk, not anchord's fault). If the host needs
   to reach the project, add a small macvlan shim on the host.
-- **One anchord per Compose project** — the design assumes per-project
+- **One network-anchor per Compose project** — the design assumes per-project
   scoping. Running multiple in the same project will race on nftables
   tables.
 - **dhclient is shelled out** (not native Go DHCP). v0.1 trade-off; renewal

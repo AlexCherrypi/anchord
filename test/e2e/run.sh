@@ -162,6 +162,289 @@ run_scenario() {
         check "anchord_v6 dnat_tcp contains port 25" "$has_25" "$REPLY_STDOUT"
     fi
 
+    # ---- Phase 2: inbound dataplane (S-2, S-3) ---------------------------
+    # Extract the project's external addresses (if any) and exercise the
+    # full LAN-client → DNAT → service-anchor namespace path. Skipped when
+    # no lease was obtained (e.g. scenario=none, or the documented Docker
+    # Desktop macvlan-on-bridge limitation).
+    local target_v4=$(extract_anchord_ext_v4 "$v4_out")
+    local target_v6=$(extract_anchord_ext_v6 "$v6_out")
+    phase2_inbound "$project" "$target_v4" "$target_v6"
+
+    # ---- Phase 2: graceful teardown (S-6) --------------------------------
+    phase2_teardown "$project"
+}
+
+# extract_anchord_ext_v4 reads the IPv4 (without /CIDR) from a single line
+# of `ip -4 -o addr show anchord-ext`, or empty if none.
+extract_anchord_ext_v4() {
+    awk '$3=="inet" {print $4}' <<<"$1" | head -n1 | cut -d/ -f1
+}
+
+# extract_anchord_ext_v6 reads the first global IPv6 (skipping link-local
+# fe80::) from `ip -6 -o addr show anchord-ext`.
+extract_anchord_ext_v6() {
+    awk '$3=="inet6" && $4 !~ /^fe80/ {print $4}' <<<"$1" | head -n1 | cut -d/ -f1
+}
+
+# phase2_inbound exercises S-2 and S-3 for whichever address families
+# actually got a lease. Each family is tested independently so v4 can
+# fail (Docker Desktop) without nullifying v6 results.
+phase2_inbound() {
+    local project=$1 v4=$2 v6=$3
+    local probe="${project}-probe-1"
+    local anchor="${project}-smtp-anchor-1"
+    local listener="${project}-smtp-listener-1"
+
+    if [ -z "$v4" ] && [ -z "$v6" ]; then
+        info "phase 2: no external lease, skipping inbound assertions"
+        return
+    fi
+
+    # Make sure probe + listener are actually up. compose up -d started
+    # them; nothing to wait on beyond what we already slept above.
+    if ! docker inspect "$probe" >/dev/null 2>&1; then
+        check "phase 2 probe container running" 0 "container $probe missing"
+        return
+    fi
+    if ! docker inspect "$listener" >/dev/null 2>&1; then
+        check "phase 2 listener container running" 0 "container $listener missing"
+        return
+    fi
+
+    if [ -n "$v4" ]; then
+        phase2_s2 "$project" 4 "$v4"
+    fi
+    if [ -n "$v6" ]; then
+        phase2_s2 "$project" 6 "$v6"
+    fi
+
+    # S-3 uses whichever family is available; v4 first (matches the
+    # primary production code path).
+    local s3_fam s3_target
+    if [ -n "$v4" ]; then s3_fam=4; s3_target="$v4"
+    elif [ -n "$v6" ]; then s3_fam=6; s3_target="$v6"
+    fi
+    phase2_s3 "$project" "$s3_fam" "$s3_target"
+}
+
+# phase2_s2 — SPEC scenario S-2: connect from probe to the project's
+# external IP, listener echoes back its perceived peer address, must
+# equal the probe's own VLAN-side address (no MASQUERADE on inbound).
+phase2_s2() {
+    local project=$1 fam=$2 target=$3
+    local probe="${project}-probe-1"
+
+    # Probe's own address on the vlan bridge.
+    local probe_ip
+    probe_ip=$(docker exec "$probe" ip -"$fam" -o addr show eth0 \
+        | awk -v fam="$fam" '
+            fam==4 && $3=="inet"  {print $4; exit}
+            fam==6 && $3=="inet6" && $4 !~ /^fe80/ {print $4; exit}' \
+        | cut -d/ -f1)
+    if [ -z "$probe_ip" ]; then
+        check "S-2 probe has v$fam address on vlan" 0
+        return
+    fi
+
+    # Open a connection. ncat: -w 2 sets I/O timeout, -$fam forces the
+    # family (avoids surprises if A/AAAA resolution ever sneaks in).
+    # `</dev/null` on the outer shell becomes ncat's stdin via docker exec.
+    local out
+    out=$(docker exec -i "$probe" ncat -w 2 -"$fam" "$target" 25 \
+        </dev/null 2>&1)
+
+    # socat reports v6 peers in fully-uncompressed form; normalize before
+    # matching so the test isn't fooled by `fd99::` vs `fd99:0000:0000:...`.
+    local match_ip="$probe_ip"
+    if [ "$fam" = "6" ]; then
+        match_ip=$(expand_v6 "$probe_ip")
+    fi
+
+    if printf '%s' "$out" | grep -Fq "$match_ip"; then
+        check "S-2 (v$fam) source IP preserved through DNAT" 1
+    else
+        check "S-2 (v$fam) source IP preserved through DNAT" 0 \
+            "expected '$match_ip' in '$out'"
+    fi
+}
+
+# expand_v6 turns a possibly-compact IPv6 address into the
+# fully-uncompressed colon-separated form (eight 4-digit hex groups).
+# Needed because socat's SOCAT_PEERADDR uses the uncompressed form
+# while `ip -6 -o addr show` uses the compact one — naive substring
+# matching across the two would always miss.
+expand_v6() {
+    awk -v a="$1" '
+        function pad(s) { while (length(s) < 4) s = "0" s; return s }
+        BEGIN {
+            if (sub(/::/, ":#:", a)) {
+                n = split(a, p, ":")
+                cnt = 0
+                for (i = 1; i <= n; i++) if (p[i] != "" && p[i] != "#") cnt++
+                miss = 8 - cnt
+                out = ""
+                for (i = 1; i <= n; i++) {
+                    if (p[i] == "#") { for (j = 0; j < miss; j++) out = out "0000:" }
+                    else if (p[i] != "") { out = out pad(p[i]) ":" }
+                }
+                sub(/:$/, "", out)
+                print out
+            } else {
+                n = split(a, p, ":")
+                out = ""
+                for (i = 1; i <= n; i++) out = out pad(p[i]) ":"
+                sub(/:$/, "", out)
+                print out
+            }
+        }'
+}
+
+# nft_map_lookup parses `nft list map …` stdout and returns the value
+# associated with the given key, or empty if not present.
+nft_map_lookup() {
+    local key=$1
+    # Split commas + braces onto their own lines so each "K : V" pair is
+    # isolated, then match the key.
+    awk -v k="$key" '
+        {
+            n = split($0, parts, /[,{}]/)
+            for (i = 1; i <= n; i++) {
+                if (match(parts[i], "^[[:space:]]*" k "[[:space:]]*:")) {
+                    sub(/^[^:]*:[[:space:]]*/, "", parts[i])
+                    gsub(/[[:space:]]/, "", parts[i])
+                    print parts[i]
+                    exit
+                }
+            }
+        }
+    '
+}
+
+# phase2_s3 — SPEC scenario S-3: force-recreate the service-anchor,
+# wait for anchord to reconverge within F-15 (5s nominal, 8s with
+# margin), assert the DNAT map points at the current container's
+# transit IP and that the path is reachable.
+#
+# Note: we do NOT require Docker IPAM to assign a different IP after
+# recreate — IPAM frequently hands the same address back when nothing
+# else is holding it. The SPEC requirement is reachability + the map
+# being current with the live container, regardless of whether the IP
+# happened to change.
+phase2_s3() {
+    local project=$1 fam=$2 target=$3
+    local anchor="${project}-smtp-anchor-1"
+    local table=anchord_v4 fam_kw=ip
+    if [ "$fam" = "6" ]; then table=anchord_v6; fam_kw=ip6; fi
+
+    # Recreate. --no-deps avoids restarting anchord; smtp-listener is
+    # listed because it shares smtp-anchor's namespace and is killed
+    # by docker when its peer goes away.
+    if ! (cd "$e2e_dir" && docker compose -p "$project" up -d \
+            --force-recreate --no-deps \
+            smtp-anchor smtp-listener >/dev/null 2>&1); then
+        check "S-3 force-recreate smtp-anchor + listener" 0
+        return
+    fi
+
+    # Read the new container's transit IP. inspect the running anchor —
+    # the network name is the compose-derived "<project>_transit".
+    local expected_ip=""
+    local deadline_ip=$(( $(date +%s) + 5 ))
+    while [ "$(date +%s)" -lt "$deadline_ip" ]; do
+        expected_ip=$(docker exec "$anchor" ip -"$fam" -o addr show eth0 2>/dev/null \
+            | awk -v fam="$fam" '
+                fam==4 && $3=="inet"  {print $4; exit}
+                fam==6 && $3=="inet6" && $4 !~ /^fe80/ {print $4; exit}' \
+            | cut -d/ -f1)
+        [ -n "$expected_ip" ] && break
+        sleep 1
+    done
+    if [ -z "$expected_ip" ]; then
+        check "S-3 smtp-anchor came back up with v$fam address" 0
+        return
+    fi
+
+    # Wait up to ~8s for the reconciler to update the DNAT map to point
+    # at the new container's IP.
+    local deadline=$(( $(date +%s) + 8 ))
+    local cur_ip=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ax "$project" nft list map "$fam_kw" "$table" dnat_tcp
+        cur_ip=$(printf '%s' "$REPLY_STDOUT" | nft_map_lookup 25)
+        [ "$cur_ip" = "$expected_ip" ] && break
+        sleep 1
+    done
+
+    if [ "$cur_ip" = "$expected_ip" ]; then
+        check "S-3 dnat_tcp:25 reflects current transit IP within 8s" 1
+    else
+        check "S-3 dnat_tcp:25 reflects current transit IP within 8s" 0 \
+            "expected=$expected_ip got=$cur_ip"
+    fi
+
+    # Reachability after reconverge.
+    local probe="${project}-probe-1"
+    local out
+    out=$(docker exec -i "$probe" ncat -w 2 -"$fam" "$target" 25 \
+        </dev/null 2>&1)
+    if printf '%s' "$out" | grep -q "from="; then
+        check "S-3 reachable on tcp/25 after recreate" 1
+    else
+        check "S-3 reachable on tcp/25 after recreate" 0 "got '$out'"
+    fi
+}
+
+# phase2_teardown — SPEC scenario S-6: stop anchord cleanly, capture
+# its exit code and final logs, then bring the stack down. Verifies
+# that anchord exits 0 and that its shutdown path logged the macvlan
+# removal (which is the observable side-effect of nat.Teardown +
+# dhcp.removeLink running on SIGTERM).
+#
+# Known gap: SPEC S-6 also requires a DHCPRELEASE on shutdown. anchord
+# kills dhclient via context cancellation (SIGKILL), so no release is
+# sent. Tracked separately; intentionally not asserted here yet.
+phase2_teardown() {
+    local project=$1
+    local anchord="${project}-anchord-1"
+
+    # Graceful stop with a generous timeout so the deferred Teardown +
+    # removeLink log lines actually flush.
+    if ! docker stop -t 10 "$anchord" >/dev/null 2>&1; then
+        check "S-6 docker stop anchord (SIGTERM)" 0
+        teardown "$project"
+        return
+    fi
+
+    local exit_code
+    exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$anchord" 2>/dev/null)
+    if [ "$exit_code" = "0" ]; then
+        check "S-6 anchord exited cleanly (code 0)" 1
+    else
+        check "S-6 anchord exited cleanly (code 0)" 0 "exit=$exit_code"
+    fi
+
+    local logs
+    logs=$(docker logs "$anchord" 2>&1)
+    if printf '%s' "$logs" | grep -q '"signal received'; then
+        check "S-6 logs show graceful shutdown" 1
+    else
+        check "S-6 logs show graceful shutdown" 0
+    fi
+    if printf '%s' "$logs" | grep -q '"macvlan removed'; then
+        check "S-6 logs show macvlan removed" 1
+    else
+        check "S-6 logs show macvlan removed" 0
+    fi
+    if printf '%s' "$logs" | grep -qi '"nat teardown'; then
+        # nat.Teardown is logged ONLY on failure (slog.Warn), so seeing
+        # the line means teardown raised. Absence == clean.
+        check "S-6 nat teardown clean (no warnings)" 0 \
+            "$(printf '%s' "$logs" | grep -i 'nat teardown' | head -n1)"
+    else
+        check "S-6 nat teardown clean (no warnings)" 1
+    fi
+
     teardown "$project"
 }
 
@@ -193,11 +476,17 @@ or macOS), L2 broadcasts from a macvlan child onto a Docker bridge are
 NOT forwarded reliably to peer veth endpoints. dhclient's DHCPDISCOVER
 will leave anchord-ext but never reach the dnsmasq container's eth0,
 so the "anchord-ext has IPv4 from 10.99.0.0/24" assertion fails here.
+
+The Phase-2 inbound dataplane assertions (S-2, S-3) ride the same path
+in reverse: probe -> bridge -> anchord-ext is also subject to the
+broadcast/learning quirk. They are skipped automatically when no v4/v6
+lease was obtained, so on Docker Desktop you'll see them run only when
+SLAAC succeeded (v6-only / both scenarios).
+
 On a real Linux host with a physical VLAN parent (eth0.42 etc.) this
-path works as intended. Treat that single FAIL as an environment
+path works as intended. Treat the v4-lease FAIL as an environment
 limitation, not an anchord bug — every other assertion verifies the
-code path that anchord actually owns (boot, nftables setup, discovery,
-DNAT map population).
+code path that anchord actually owns.
 BANNER
 
 declare -A summary_pass

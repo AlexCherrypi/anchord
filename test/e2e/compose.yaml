@@ -102,14 +102,51 @@ services:
     depends_on: [docker-proxy, dhcp]
     restart: "no"
 
-  # A minimal service-anchor: alpine sleeper with the anchord.expose
-  # label. anchord's discovery+reconciler should pick it up and program
-  # tcp/25 -> this container's transit IP into the nftables map. No
-  # real listener — Phase 1 verifies the control plane only.
+  # A minimal service-anchor running anchord in service-anchor mode.
+  # The anchord container's discovery + reconciler picks it up via
+  # the anchord.expose label and programs tcp/25 -> this container's
+  # transit IP into the nftables map. Service-anchor mode itself
+  # resolves the network-anchor's hostname via Docker DNS and keeps
+  # this namespace's default route pointed at it (SPEC §2.6) — without
+  # which the inbound DNAT path's response would have nowhere to go
+  # on `internal: true` bridges.
   smtp-anchor:
-    image: alpine:3.19
-    command: ["sleep", "infinity"]
+    image: anchord:test
+    cap_add: [NET_ADMIN]
+    environment:
+      ANCHORD_MODE: service-anchor
+      # `anchord` resolves to the network-anchor's transit IP via
+      # Compose-network DNS. Default; spelled out here for clarity.
+      ANCHORD_GATEWAY_HOSTNAME: anchord
+      ANCHORD_LOG_LEVEL: debug
     networks: [transit]
+    depends_on: [anchord]
     labels:
       anchord.expose: "tcp/25"
+    restart: "no"
+
+  # Phase-2 listener — joins smtp-anchor's network namespace (the
+  # "pod" pattern anchord is built around). When the probe connects
+  # to the project's external IP on tcp/25, the kernel DNATs it to
+  # smtp-anchor's transit IP, the listener accepts, and writes back
+  # the perceived peer address. The probe asserts that address equals
+  # its own VLAN-side IP — i.e., MASQUERADE was NOT applied (SPEC S-2).
+  smtp-listener:
+    build:
+      context: .
+      dockerfile: images/tcp-echo/Dockerfile
+    image: anchord-e2e/tcp-echo:latest
+    network_mode: "service:smtp-anchor"
+    depends_on: [smtp-anchor]
+    restart: "no"
+
+  # Phase-2 probe — a plain host on the VLAN bridge. The harness execs
+  # into it to read its own address and to drive `nc` against the
+  # project's external IP.
+  probe:
+    build:
+      context: .
+      dockerfile: images/probe/Dockerfile
+    image: anchord-e2e/probe:latest
+    networks: [vlan]
     restart: "no"

@@ -106,6 +106,8 @@ suggestion.
 | macvlan, not ipvlan | DHCP-by-MAC works | ipvlan L2 (shared MAC defeats DHCP reservation) |
 | Docker socket proxy | Read-only access to events/containers | Mounting the raw socket (root-equivalent) |
 | Compose-label-driven | No central config to drift | Static config files |
+| Docker DNS for gateway discovery | Service-anchors find the network-anchor's transit IP via the Compose-network resolver — survives recreates with no operator config | Static `ipv4_address`/`ipv6_address` pinning (operator burden); IPv6 RA emission (asymmetric — solves v6 but not v4); anchord exec-into-service-anchors via Docker socket (expands attack surface, breaks the read-only socket invariant) |
+| Service-anchor mode in same binary | Single image, code share for netlink/slog/signal handling, narrative consistency ("one project = one server, anchord is its networking shim in two flavors") | Separate `anchord-anchor` binary (two images to maintain, no real benefit); user-written `command: ["sh","-c","ip route add ..."]` (fragile, can't react to network-anchor IP change without yet another supervisor) |
 
 ## Anti-patterns to reject in PRs
 
@@ -121,6 +123,34 @@ one.
   if it doesn't add knobs to the DHCP path.
 - **Multiple anchords per project** — no, scope conflict.
 - **A web UI** — no, logs and metrics are sufficient.
+- **The network-anchor reaching into service-anchor namespaces to fix
+  routing** — no. The Docker socket is read-only on purpose. The
+  service-anchor mode loop running *inside* the service-anchor is the
+  right place for that concern; it owns its own netns and doesn't need
+  privileged access to anyone else's.
+- **Pinning the network-anchor's transit IP via `ipv4_address` /
+  `ipv6_address`** — no. IPAM-stable IPs are a hidden coupling between
+  Compose files; "Configuration scarcity" pushes toward DNS lookup
+  instead.
+
+## Why the binary has two modes
+
+The network-anchor and the service-anchor are different roles, but they
+share a lot: the netlink toolkit, the slog setup, the signal-driven
+shutdown, the env-var configuration style. Splitting them into two
+binaries would duplicate that scaffolding without solving any new
+problem. Keeping them together also matches the single-image story
+operators tell each other: "anchord is a Compose project's networking
+shim — one network-anchor per project, N service-anchors, all the
+same image."
+
+The mode is selected by `ANCHORD_MODE`, defaulting to `network-anchor`.
+The `command: [service-anchor]` form is a convenience equivalent. We
+deliberately do **not** auto-detect the mode (e.g., from the presence
+or absence of `ANCHORD_VLAN_PARENT`): silent fall-through to
+service-anchor mode when an operator forgets to set the VLAN parent
+would mask a misconfiguration as a working-but-pointless container.
+Explicit mode selection produces loud, correct failures.
 
 ## When to break these rules
 
