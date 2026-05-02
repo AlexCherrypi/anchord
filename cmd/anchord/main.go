@@ -262,3 +262,4 @@ func setupLogger(level string) {
 	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	slog.SetDefault(slog.New(h))
 }
+

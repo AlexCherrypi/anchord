@@ -85,6 +85,15 @@ services:
       # forwarding is enabled. Without this, a forwarding host ignores RAs.
       net.ipv6.conf.all.accept_ra: "2"
       net.ipv6.conf.default.accept_ra: "2"
+      # arp_ignore=1 / arp_announce=2 prevent the macvlan parent (eth1
+      # here) from claiming ARPs for IPs that live on its macvlan child
+      # (anchord-ext). Without it, peers ARP-resolve anchord-ext's IP
+      # to eth1's MAC, inbound TCP lands on eth1 instead of anchord-ext,
+      # the iifname match in the prerouting DNAT rule misses, and the
+      # local stack RSTs the connection. Docker mounts /proc/sys as
+      # read-only at runtime, so this MUST be set via compose sysctls.
+      net.ipv4.conf.all.arp_ignore: "1"
+      net.ipv4.conf.all.arp_announce: "2"
     environment:
       # Must match the compose project name so the discovery filter
       # (com.docker.compose.project=...) hits our own containers.

@@ -73,6 +73,18 @@ services:
   anchord:
     image: ghcr.io/alexcherrypi/anchord:latest
     cap_add: [NET_ADMIN]
+    sysctls:
+      # Required: anchord forwards between macvlan and transit.
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      # accept_ra=2 lets the kernel still take SLAAC from upstream RAs
+      # while forwarding is enabled.
+      net.ipv6.conf.all.accept_ra: "2"
+      # arp_ignore=1 / arp_announce=2 keep anchord-ext's IP from being
+      # ARP-claimed by the macvlan parent — without these, inbound TCP
+      # can land on the parent interface and miss the DNAT rule.
+      net.ipv4.conf.all.arp_ignore: "1"
+      net.ipv4.conf.all.arp_announce: "2"
     environment:
       ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
       ANCHORD_VLAN_PARENT: eth0.42

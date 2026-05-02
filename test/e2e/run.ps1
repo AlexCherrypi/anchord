@@ -41,6 +41,7 @@ $dockerArgs = @(
     '-e', 'REPO_ROOT=/repo',
     '-e', "WAIT_SECONDS=$($env:WAIT_SECONDS ?? '15')",
     '-e', "NO_TEARDOWN=$($env:NO_TEARDOWN ?? '0')",
+    '-e', "E2E_BRIDGE_FLOOD_FIX=$($env:E2E_BRIDGE_FLOOD_FIX ?? '0')",
     'anchord-e2e-runner',
     'test/e2e/run.sh'
 ) + $Scenarios

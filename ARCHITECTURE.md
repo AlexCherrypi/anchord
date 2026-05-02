@@ -274,6 +274,12 @@ services:
   anchord:
     image: ghcr.io/alexcherrypi/anchord:latest
     cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.accept_ra: "2"
+      net.ipv4.conf.all.arp_ignore: "1"
+      net.ipv4.conf.all.arp_announce: "2"
     environment:
       ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
       ANCHORD_VLAN_PARENT: eth0.42

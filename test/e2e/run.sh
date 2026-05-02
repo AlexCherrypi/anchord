@@ -18,6 +18,7 @@ repo_root="${REPO_ROOT:-/repo}"
 e2e_dir="$repo_root/test/e2e"
 wait_seconds="${WAIT_SECONDS:-15}"
 no_teardown="${NO_TEARDOWN:-0}"
+bridge_flood_fix="${E2E_BRIDGE_FLOOD_FIX:-0}"
 
 # Default to all four scenarios if no args given.
 if [ "$#" -eq 0 ]; then
@@ -90,6 +91,13 @@ run_scenario() {
         fail "compose up"
         return 1
     fi
+
+    # Optional Docker Desktop workaround for the macvlan-on-bridge L2
+    # broadcast quirk. See banner above and apply_bridge_flood_fix.
+    if [ "$bridge_flood_fix" = "1" ]; then
+        apply_bridge_flood_fix "$project"
+    fi
+
     info "stack up — waiting ${wait_seconds}s for DHCP / RA / reconcile"
     sleep "$wait_seconds"
 
@@ -254,11 +262,15 @@ phase2_s2() {
     out=$(docker exec -i "$probe" ncat -w 2 -"$fam" "$target" 25 \
         </dev/null 2>&1)
 
-    # socat reports v6 peers in fully-uncompressed form; normalize before
-    # matching so the test isn't fooled by `fd99::` vs `fd99:0000:0000:...`.
-    local match_ip="$probe_ip"
+    # The listener uses TCP6-LISTEN with ipv6only=0, so v4 peers are
+    # reported in v4-mapped-v6 hex form ("10.99.0.3" -> "0a63:0003"),
+    # and v6 peers in fully-uncompressed form. Normalize both sides
+    # before substring-matching so the test isn't fooled by formatting.
+    local match_ip
     if [ "$fam" = "6" ]; then
         match_ip=$(expand_v6 "$probe_ip")
+    else
+        match_ip=$(v4_to_hex "$probe_ip")
     fi
 
     if printf '%s' "$out" | grep -Fq "$match_ip"; then
@@ -267,6 +279,15 @@ phase2_s2() {
         check "S-2 (v$fam) source IP preserved through DNAT" 0 \
             "expected '$match_ip' in '$out'"
     fi
+}
+
+# v4_to_hex turns "10.99.0.3" into "0a63:0003" — the v4-mapped-v6
+# representation socat emits for v4 peers when the listener was opened
+# via TCP6-LISTEN,ipv6only=0.
+v4_to_hex() {
+    local IFS=.
+    set -- $1
+    printf '%02x%02x:%02x%02x' "$1" "$2" "$3" "$4"
 }
 
 # expand_v6 turns a possibly-compact IPv6 address into the
@@ -448,6 +469,38 @@ phase2_teardown() {
     teardown "$project"
 }
 
+# apply_bridge_flood_fix is the Docker Desktop dev convenience.
+#
+# Empirically the v4-DHCPDISCOVER-blackholing on Docker Desktop is NOT
+# a "macvlan rx_handler vs. bridge rx_handler" kernel quirk as one
+# might first assume — it is `bridge-nf-call-iptables=1` (the WSL2 VM
+# default) routing every Layer-2 bridge frame through the iptables
+# FORWARD chain, where Docker's auto-generated DOCKER-FORWARD rules
+# drop inter-bridge broadcasts. Confirmed by tcpdump: frames egress
+# anchord-ext cleanly, the bridge sees them, but the FORWARD chain
+# drops them before they reach peer veth ports. Setting
+# bridge-nf-call-iptables=0 makes them flow.
+#
+# WARNING: This is dev-only. Setting bridge-nf-call-iptables=0 on a
+# production host weakens Docker's inter-container filtering. Don't
+# do this anywhere that isn't a throwaway dev VM. Production anchord
+# deployments don't need any of this — there `lowerdev` is a physical
+# VLAN sub-interface, frames don't traverse a Linux bridge at all.
+apply_bridge_flood_fix() {
+    # Host-wide; bridge-name not needed. We still keep the project arg
+    # for a future per-bridge variant and for log clarity.
+    local project=$1
+
+    if docker run --rm --net=host --privileged alpine:3.19 sh -c "
+        echo 0 > /proc/sys/net/bridge/bridge-nf-call-iptables  2>/dev/null
+        echo 0 > /proc/sys/net/bridge/bridge-nf-call-ip6tables 2>/dev/null
+    " >/dev/null 2>&1; then
+        info "bridge-nf-call-iptables/ip6tables = 0 (host-wide)"
+    else
+        warn "[harness] bridge-nf-call disable helper failed"
+    fi
+}
+
 teardown() {
     local project=$1
     if [ "$no_teardown" = "1" ]; then
@@ -487,6 +540,13 @@ On a real Linux host with a physical VLAN parent (eth0.42 etc.) this
 path works as intended. Treat the v4-lease FAIL as an environment
 limitation, not an anchord bug — every other assertion verifies the
 code path that anchord actually owns.
+
+Set E2E_BRIDGE_FLOOD_FIX=1 to apply a privileged bridge-flood
+workaround to the docker network's vlan bridge after compose up. This
+forces broadcast flooding to all bridge member ports, which bypasses
+the macvlan-on-bridge quirk and lets v4 DHCP complete locally too.
+The workaround is dev-convenience only — it is NOT applied in any
+production setup, where the physical VLAN parent makes it unnecessary.
 BANNER
 
 declare -A summary_pass

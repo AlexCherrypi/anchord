@@ -21,5 +21,6 @@ exec docker run --rm \
     -e REPO_ROOT=/repo \
     -e WAIT_SECONDS="${WAIT_SECONDS:-15}" \
     -e NO_TEARDOWN="${NO_TEARDOWN:-0}" \
+    -e E2E_BRIDGE_FLOOD_FIX="${E2E_BRIDGE_FLOOD_FIX:-0}" \
     anchord-e2e-runner \
     test/e2e/run.sh "$@"
