@@ -1,5 +1,10 @@
 # anchord
 
+[![CI](https://github.com/AlexCherrypi/anchord/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexCherrypi/anchord/actions/workflows/ci.yml)
+[![Container](https://img.shields.io/badge/ghcr.io-anchord-blue?logo=docker)](https://github.com/AlexCherrypi/anchord/pkgs/container/anchord)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/AlexCherrypi/anchord)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > One IP per Compose project. No subnet bookkeeping. Real client source IPs.
 
 `anchord` is a per-project network anchor for Docker Compose. It gives a Compose
