@@ -282,18 +282,18 @@ tag whose recorded hash does not match the current source — so this
 block is the project's release-readiness signal.
 
 ```
-Last verified: 2026-05-02T18:45:34Z
-Code hash:     sha256:5e1e76eda39080fffbdee5906031c7e67e10782f99a3a3ff2b8a7164737d6a84
+Last verified: 2026-05-02T19:02:42Z
+Code hash:     sha256:d1d62fd9d24174be3304a57b9f3c5823a59d10d61bb82581d7f3fd2521f3fa0a
 Flood fix:     E2E_BRIDGE_FLOOD_FIX=1
 
 go vet + go test ./...
-ok  	github.com/AlexCherrypi/anchord/cmd/anchord	0.008s
-ok  	github.com/AlexCherrypi/anchord/internal/config	0.006s
+ok  	github.com/AlexCherrypi/anchord/cmd/anchord	0.006s
+ok  	github.com/AlexCherrypi/anchord/internal/config	0.005s
 ?   	github.com/AlexCherrypi/anchord/internal/conntrack	[no test files]
 ?   	github.com/AlexCherrypi/anchord/internal/dhcp	[no test files]
 ok  	github.com/AlexCherrypi/anchord/internal/discovery	0.006s
 ok  	github.com/AlexCherrypi/anchord/internal/labels	0.005s
-ok  	github.com/AlexCherrypi/anchord/internal/nat	0.004s
+ok  	github.com/AlexCherrypi/anchord/internal/nat	0.005s
 ok  	github.com/AlexCherrypi/anchord/internal/reconciler	0.006s
 ok  	github.com/AlexCherrypi/anchord/internal/serviceanchor	0.015s
 

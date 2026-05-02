@@ -161,10 +161,15 @@ project genesis:
   e2e v6-only run confirms SLAAC works through anchord's macvlan child.
   DHCPv6 (e.g. for hostname-announcement on v6) is not implemented;
   decision pending: ship in v0.1 or defer.
-- [ ] Behavior when the VLAN parent interface goes down mid-run.
-  Today: dhclient dies, the supervisor backs off and retries; macvlan
-  re-creation after parent recovery is untested. Worth a smoke test
-  + maybe a small explicit re-attach.
+- [x] Behavior when the VLAN parent interface goes down mid-run.
+  `dhcp.Supervisor.Run` now calls an idempotent `ensureLink` at the
+  top of every iteration and runs a 2 s link-state watcher alongside
+  dhclient (`watchLinkUsable`). When the macvlan child disappears or
+  is brought down — parent flap, external `ip link del`, etc. — the
+  watcher cancels dhclient's child context, dhclient is killed, the
+  loop wraps around and `ensureLink` recreates the child. Verified
+  by smoke-testing `ip link del anchord-ext` while the stack was up:
+  link comes back at a new ifindex with the same IP within ~12 s.
 
 ## Style notes for human-facing text
 
