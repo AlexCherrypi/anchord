@@ -34,6 +34,19 @@ RUN apk add --no-cache \
 
 COPY --from=build /out/anchord /usr/local/bin/anchord
 
+# OCI image annotations — surface metadata on ghcr.io and in
+# `docker inspect`. The build workflow's metadata-action overrides
+# the version/created/revision triplet at push time; everything else
+# stays static here so locally-built images carry the same labels.
+LABEL org.opencontainers.image.title="anchord" \
+      org.opencontainers.image.description="Per-project network anchor for Docker Compose: one external IP per project (DHCP+macvlan), real client source IPs, nftables DNAT to labelled service-anchors." \
+      org.opencontainers.image.source="https://github.com/AlexCherrypi/anchord" \
+      org.opencontainers.image.url="https://github.com/AlexCherrypi/anchord" \
+      org.opencontainers.image.documentation="https://github.com/AlexCherrypi/anchord#readme" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.authors="Alexander Kirsch" \
+      org.opencontainers.image.vendor="AlexCherrypi"
+
 # anchord needs CAP_NET_ADMIN for netlink and macvlan operations.
 # It does NOT need to run as root — set the capabilities at compose
 # level via cap_add.
