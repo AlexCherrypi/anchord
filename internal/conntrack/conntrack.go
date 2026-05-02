@@ -16,16 +16,24 @@ import (
 	"os/exec"
 )
 
+// runner is the package-level seam that runs the conntrack subprocess.
+// Production wires it to exec.CommandContext + CombinedOutput; tests
+// swap it for a recorder.
+var runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
 // FlushDestination removes all conntrack entries whose post-DNAT
 // destination matches ip. Called after we update an nftables map so
 // that already-tracked connections re-evaluate the new mapping.
+//
+// `ip == nil` is a no-op so callers don't have to special-case the
+// "first reconcile, nothing to flush yet" case.
 func FlushDestination(ctx context.Context, ip net.IP) {
 	if ip == nil {
 		return
 	}
-	flag := "-d"
-	cmd := exec.CommandContext(ctx, "conntrack", flag, ip.String(), "-D")
-	out, err := cmd.CombinedOutput()
+	out, err := runner(ctx, "conntrack", "-d", ip.String(), "-D")
 	if err != nil {
 		// `conntrack -D` exits non-zero with code 1 when no entries
 		// match. That's noise, not a failure.
