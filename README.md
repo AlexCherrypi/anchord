@@ -64,12 +64,27 @@ This is intentional: anchord doesn't try to be a reverse proxy, an ingress
 controller, or a service mesh. It gives you a server-shaped abstraction,
 and you build the rest with whatever tools fit.
 
-## Why not just `network_mode: macvlan` per service?
+## How it compares
 
-That gives every container its own MAC and IP. Our goal is the opposite:
-several containers in one project sharing a single externally-visible IP,
-while still getting full internal DNS-based service discovery. anchord
-gives you exactly that — see [Architecture](#architecture).
+anchord lives in a niche the usual tools don't quite fill — it's not
+a reverse proxy, not an ingress controller, not a service mesh. It's
+a layer-4 NAT shim that gives a Compose project a server-shaped
+network identity. Quick map:
+
+| Approach | One IP per project? | Real source IPs preserved? | DHCP / hostname on the LAN? | Internal DNS service discovery? |
+|---|:---:|:---:|:---:|:---:|
+| `ports: "1.2.3.4:80:80"` | manual | no (bridge NAT mangles them) | no | yes |
+| `network_mode: host` | shared with host | yes | host's only | no per-stack |
+| `network_mode: macvlan` per service | no — one per container | yes | per container | broken (each container is its own L2 endpoint) |
+| Traefik / Caddy / nginx in host mode | no | yes for HTTP(S) only | no | yes |
+| Kubernetes ingress + LoadBalancer | yes (per Service) | depends on mode | not on bare LAN | yes |
+| **anchord** | **yes** | **yes** | **yes** | **yes** |
+
+It's specifically built for *"I want this Compose project to look like
+a real server on my LAN"* — the problem nothing else solves cleanly.
+anchord stops at layer 4 by design; if you need TLS termination,
+hostname routing, or HTTP-aware load balancing, run a reverse proxy
+*as* a service-anchor and let it own ports 80/443.
 
 ## How it looks
 
