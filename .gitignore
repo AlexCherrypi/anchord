@@ -1,0 +1,18 @@
+# Binaries
+/anchord
+/bin/
+/out/
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local overrides
+.env
+docker-compose.override.yaml

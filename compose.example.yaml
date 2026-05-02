@@ -1,0 +1,112 @@
+# Example: a Mailcow-style compose project using anchord for a single
+# external IP via DHCP, with two service-anchors (smtp + imap).
+#
+# What you get:
+#   - One IP on the VLAN (DHCP-assigned, hostname-announced)
+#   - SMTP ports (25/465/587) DNAT'd to the postfix container
+#   - IMAP ports (143/993) DNAT'd to the dovecot container
+#   - Real client source IPs preserved (no MASQUERADE on inbound)
+#   - Internal DNS-based service discovery (mysql, redis are unreachable
+#     from outside, only via the backend network)
+#
+# Adjust ANCHORD_VLAN_PARENT to your host's VLAN sub-interface.
+
+name: mailcow-example
+
+networks:
+  transit:
+    # Anchor-to-anchor + anchord-to-service-anchors.
+    # Internal: no implicit gateway, no Docker-managed NAT.
+    driver: bridge
+    internal: true
+  backend:
+    # Application <-> DB/cache. Service-anchors don't need to be in here
+    # unless they themselves need DB access; in this example dovecot does.
+    driver: bridge
+    internal: true
+
+services:
+
+  # ---------- the anchor itself ---------------------------------------------
+  anchord:
+    image: ghcr.io/alexcherrypi/anchord:latest   # (build locally for now)
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+    environment:
+      ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
+      ANCHORD_VLAN_PARENT: eth0.42        # ← your VLAN sub-interface on the host
+      ANCHORD_DHCP_HOSTNAME: mailcow      # appears in DHCP/DNS
+      ANCHORD_LOG_LEVEL: info
+      DOCKER_HOST: tcp://docker-proxy:2375
+    networks:
+      - transit
+    depends_on:
+      - docker-proxy
+    restart: unless-stopped
+
+  docker-proxy:
+    # Read-only docker socket exposure. anchord only needs containers + events.
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      NETWORKS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - transit
+    restart: unless-stopped
+
+  # ---------- service anchor: SMTP -----------------------------------------
+  smtp-anchor:
+    image: alpine:3.19
+    command: ["sleep", "infinity"]
+    networks:
+      - transit
+      - backend
+    labels:
+      anchord.expose: "tcp/25,tcp/465,tcp/587"
+    restart: unless-stopped
+
+  postfix:
+    image: catatnight/postfix   # or mailcow's actual postfix image
+    network_mode: "service:smtp-anchor"
+    networks: []                # inherits from smtp-anchor — must be empty here
+    depends_on:
+      - smtp-anchor
+    restart: unless-stopped
+
+  # ---------- service anchor: IMAP -----------------------------------------
+  imap-anchor:
+    image: alpine:3.19
+    command: ["sleep", "infinity"]
+    networks:
+      - transit
+      - backend
+    labels:
+      anchord.expose: "tcp/143,tcp/993"
+    restart: unless-stopped
+
+  dovecot:
+    image: dovecot/dovecot
+    network_mode: "service:imap-anchor"
+    depends_on:
+      - imap-anchor
+    restart: unless-stopped
+
+  # ---------- backend services (no external exposure) ----------------------
+  mysql:
+    image: mariadb:11
+    networks: [backend]
+    environment:
+      MARIADB_ROOT_PASSWORD: example
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    networks: [backend]
+    restart: unless-stopped
