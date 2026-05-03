@@ -19,3 +19,6 @@ docker-compose.override.yaml
 
 # Local scratch — agent-generated screenshots, ad-hoc test artifacts
 .tmp/
+
+# Claude Code agent state (commit hooks, scheduled-task locks, etc.)
+.claude/
