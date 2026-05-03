@@ -369,8 +369,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-03T02:34:43Z
-- **Code hash:** `sha256:527da986e82aa7d27c925a485c00957f1a002467fdc6b72a253343f8eceabf48`
+- **Last verified:** 2026-05-03T03:40:27Z
+- **Code hash:** `sha256:1d4583cf6e243c3d68c3cdba61d9cc42a3165d4d8c2012adf921d32fe6e4db52`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
