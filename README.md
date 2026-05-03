@@ -169,51 +169,30 @@ The sketch below is the one-screen version.
 
 ```mermaid
 flowchart TD
-    %% Three roles in vertical layers:
-    %%   LAN  ->  network-anchor (anchord)  ->  transit-bridge
-    %%        ->  service-anchors (+ app containers via netns share)
-    %%        ->  backend-bridge  ->  DBs
+    %% Three roles in vertical layers: LAN -> network-anchor ->
+    %% transit-bridge -> service-anchors (+ app containers joined
+    %% via netns share) -> backend-bridge -> DBs.
     %%
-    %% Edge styles:
-    %%   solid arrow  =  traffic flow
-    %%   thick arrow  =  membership in a Docker bridge
-    %%   dashed arrow =  netns share via network_mode:service:<anchor>
+    %% Edge styles: solid arrow = traffic flow,
+    %% thick arrow = membership in a Docker bridge,
+    %% dashed arrow = netns share via network_mode service.
 
-    %% External entry: VLAN sub-interface on the host. The whole
-    %% project gets ONE IP via DHCP on this VLAN.
-    LAN[/"External LAN<br/>VLAN eth0.42"/]
+    LAN[External LAN - VLAN eth0.42]
+    Anchord[anchord network-anchor mode<br>macvlan + nftables<br>DNAT-by-map + masquerade]
+    Transit[transit-bridge<br>Docker bridge, internal: true]
+    Smtp[smtp-anchor<br>service-anchor mode<br>namespace owner]
+    Imap[imap-anchor<br>service-anchor mode<br>namespace owner]
+    Postfix(postfix)
+    Dovecot(dovecot)
+    Backend[backend-bridge<br>Docker bridge, internal: true]
+    DBs[mysql, redis, ...]
 
-    %% Network-anchor: holds the macvlan child, runs the DHCP
-    %% client, owns the nftables NAT state. One per project.
-    Anchord["<b>anchord</b> (network-anchor mode)<br/>macvlan child + DNAT-by-map<br/>+ masquerade on egress"]
-
-    %% Transit bridge: where the network-anchor and all
-    %% service-anchors meet. internal:true so Docker's
-    %% own MASQUERADE doesn't meddle with our paths.
-    Transit[("<b>transit-bridge</b><br/>Docker bridge, internal: true")]
-
-    %% Service-anchors: own a netns, maintain a default route
-    %% to the network-anchor, serve as namespace targets for
-    %% application containers via network_mode: service:&lt;anchor&gt;.
-    Smtp["<b>smtp-anchor</b><br/>service-anchor mode<br/>(namespace owner)"]
-    Imap["<b>imap-anchor</b><br/>service-anchor mode<br/>(namespace owner)"]
-
-    %% Application containers - share the SA's netns,
-    %% no own IP, no own MAC. Just processes in a borrowed namespace.
-    Postfix(("postfix"))
-    Dovecot(("dovecot"))
-
-    %% Backend bridge: shared L2 for SAs to reach DBs.
-    %% Backend services never see the transit network.
-    Backend[("<b>backend-bridge</b><br/>Docker bridge, internal: true")]
-    DBs[/"mysql, redis, ..."/]
-
-    LAN -->|"macvlan + DHCP<br/>one IP per project"| Anchord
+    LAN -->|macvlan + DHCP - one IP per project| Anchord
     Anchord ==> Transit
     Transit ==> Smtp
     Transit ==> Imap
-    Smtp -.->|"network_mode:<br/>service:smtp-anchor"| Postfix
-    Imap -.->|"network_mode:<br/>service:imap-anchor"| Dovecot
+    Smtp -.->|network_mode service| Postfix
+    Imap -.->|network_mode service| Dovecot
     Smtp ==> Backend
     Imap ==> Backend
     Backend ==> DBs
