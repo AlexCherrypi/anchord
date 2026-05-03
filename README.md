@@ -167,6 +167,12 @@ service-anchors, backends), how traffic flows end-to-end, and the
 invariants the code relies on — read [ARCHITECTURE.md](ARCHITECTURE.md).
 The sketch below is the one-screen version.
 
+Two companion docs round out the picture:
+[SPEC.md](SPEC.md) is the contract anchord must meet (functional
+requirements, acceptance scenarios, non-goals), and
+[CONTEXT.md](CONTEXT.md) records the design rationale and the
+alternatives that were considered and rejected.
+
 ```mermaid
 flowchart TD
     %% Three roles in vertical layers: LAN -> network-anchor ->
