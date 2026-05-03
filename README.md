@@ -168,27 +168,30 @@ invariants the code relies on — read [ARCHITECTURE.md](ARCHITECTURE.md).
 The sketch below is the one-screen version.
 
 ```
-                    VLAN (eth0.42)
-                          │
-            ┌─────────────┴────────────┐
-            │   anchord container      │
-            │                          │
-            │   anchord-ext (macvlan)  │   ← DHCP-assigned IP, stable MAC
-            │     │                    │
-            │   nftables               │
-            │   ├─ dnat_tcp { 25→…, 143→… }
-            │   └─ masquerade on egress
-            │     │                    │
-            │   transit-bridge (Docker)│
-            └─────────────┬────────────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                                   │
-   smtp-anchor                          imap-anchor
-   (postfix joins via                   (dovecot joins via
-    network_mode: service:smtp-anchor)   network_mode: service:imap-anchor)
-        │                                   │
-        └────── backend bridge (mysql, redis, …) ──┘
+        External LAN (VLAN eth0.42)
+                    │
+                    │  macvlan + DHCP — project gets one IP
+                    ▼
+         ┌──────────────────────┐
+         │  anchord             │   network-anchor mode:
+         │  (macvlan + nftables)│   macvlan child + DNAT-by-map +
+         └──────────┬───────────┘   masquerade on egress
+                    │
+   ════════════ transit-bridge ════════════   (Docker, internal: true)
+                    │
+            ┌───────┴────────┐
+            │                │
+        ┌───┴────┐       ┌───┴────┐
+        │ smtp-  │       │ imap-  │           service-anchors:
+        │ anchor │       │ anchor │           namespace owners
+        └───┬────┘       └───┬────┘
+          postfix          dovecot            application containers
+                                              join via network_mode:
+                                              service:<anchor>
+            │                │
+   ════════════ backend-bridge ════════════   (Docker, internal: true)
+                    │
+                mysql, redis, …
 ```
 
 Three layers, by design:
