@@ -175,15 +175,20 @@ flowchart TD
     %% Edge styles: solid = traffic flow, thick = bridge membership,
     %% dashed = netns share via network_mode service.
 
-    LAN[External LAN - VLAN eth0.42]
+    %% Shapes by role:
+    %%   [/.../]   = boundary  (the LAN, the DBs)
+    %%   {{ ... }} = bridge    (Docker L2 broadcast domain)
+    %%   [ ... ]   = container (anchord + service-anchors)
+    %%   ( ... )   = process   (app containers — share netns, no own IP)
+    LAN[/External LAN - VLAN eth0.42/]
     Anchord[anchord network-anchor mode<br>macvlan + nftables<br>DNAT-by-map + masquerade]
-    Transit[transit-bridge<br>Docker bridge, internal: true]
+    Transit{{transit-bridge<br>Docker bridge, internal: true}}
     Smtp[smtp-anchor<br>service-anchor mode<br>namespace owner]
     Imap[imap-anchor<br>service-anchor mode<br>namespace owner]
     Postfix(postfix)
     Dovecot(dovecot)
-    Backend[backend-bridge<br>Docker bridge, internal: true]
-    DBs[mysql, redis, ...]
+    Backend{{backend-bridge<br>Docker bridge, internal: true}}
+    DBs[/mysql, redis, .../]
 
     LAN -->|macvlan + DHCP - one IP per project| Anchord
     Anchord ==> Transit
