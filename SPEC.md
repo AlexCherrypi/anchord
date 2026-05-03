@@ -40,7 +40,7 @@ several containers", that's a bug.
   for the offending container, not silently resolved.
 - **F-9** The original client source IP (v4 and v6) is preserved through
   DNAT — no MASQUERADE on inbound paths.
-- **F-10** Both TCP and UDP are supported. v0.1 scope.
+- **F-10** Both TCP and UDP are supported.
 - **F-11** IPv6 exposure is automatic by default (mirrors v4 rules onto the
   AAAA address). Per-container opt-out via `anchord.expose.v6: off`.
 
@@ -197,7 +197,7 @@ share one socket by design.
   Go-runtime metrics are emitted by `client_golang`; no
   additional collectors or exporters bundled.
 
-## 4. Explicit non-goals (v0.1 → v1.0)
+## 4. Explicit non-goals (v1.0 scope)
 
 - Layer-7 routing, TLS termination, hostname-based dispatch.
 - Multi-host meshing or replication.
@@ -205,7 +205,7 @@ share one socket by design.
 - Web UI, dashboard, or interactive CLI.
 - Automatic firewall hardening beyond what DNAT/MASQUERADE require.
 - Support for non-DHCP external addressing (static, SLAAC-only, etc.).
-  May come later, but not v0.1.
+  May come in a later release.
 - iptables-legacy fallback. nftables only.
 - Running outside a container (no "anchord on the host" mode).
 

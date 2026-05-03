@@ -18,17 +18,23 @@ before writing code. Don't quietly route around the design.
 
 ## Project status
 
-Pre-alpha. Functional surface as of 2026-05-02:
+Beta, feature-complete. Functional surface as of 2026-05-03:
 
 - Network-anchor and service-anchor modes both implemented and
   tested. Single binary, `ANCHORD_MODE=network-anchor` (default) or
   `ANCHORD_MODE=service-anchor` (or `command: [service-anchor]`).
-- Phase-2 e2e harness lands at 54/54 across all four DHCP scenarios
-  on Docker Desktop with `E2E_BRIDGE_FLOOD_FIX=1` (a one-shot
-  `bridge-nf-call-iptables=0` host-wide tweak that's only needed on
-  Docker Desktop's WSL2 bridge — production Linux hosts don't need
-  it). Without the flag: 50/54, the 4 deltas are exactly the v4 DHCP
-  path the workaround unlocks.
+- Observability (SPEC §2.7 + §2.8) wired into both modes:
+  Prometheus `/metrics` plus `/healthz` (liveness) and `/readyz`
+  (readiness) on a single HTTP listener, default
+  `ANCHORD_METRICS_ADDR=127.0.0.1:9090` (loopback-only so the macvlan
+  doesn't see it).
+- e2e harness lands at 70/70 across 5 DHCP scenarios (v4-only,
+  v6-only, both, none, dhcpv6-stateful) on Docker Desktop with
+  `E2E_BRIDGE_FLOOD_FIX=1` — a one-shot `bridge-nf-call-iptables=0`
+  host-wide tweak only needed on Docker Desktop's WSL2 bridge;
+  production Linux hosts don't need it. Combined with 97/97 unit
+  tests, the auto-generated TEST-REPORT block in README is the
+  release-readiness signal.
 - Two F-20 fixes landed on the way: `main` no longer treats
   `context.Canceled` as fatal (exit 1 on SIGTERM was wrong), and the
   dhcp goroutine is now awaited via `WaitGroup` so its deferred
@@ -41,9 +47,9 @@ Pre-alpha. Functional surface as of 2026-05-02:
   whose tagged commit is either off-main or whose recorded hash is
   stale.
 
-Next gaps: see "Open questions / future work" below. Highest leverage
-for v1.0 readiness is real-host validation; the rest are SPEC-level
-decisions (metrics, health).
+Only outstanding gap before a v1 tag: real-host validation (run e2e
+on a Linux host with a physical VLAN sub-interface, confirm 70/70
+without `E2E_BRIDGE_FLOOD_FIX`).
 
 DHCP is pure-Go as of 2026-05-02 (`github.com/insomniacslk/dhcp` via
 `internal/dhcp/dhcp.go`); no more `dhclient` subprocess and no more
@@ -135,12 +141,11 @@ project genesis:
   quirk, not anchord — re-verify v4 lease path on a real Linux host.
 - [x] Phase-2 e2e: real listener inside the service-anchor namespace
   + probe container on the lan bridge, S-2/S-3/S-6 assertions in
-  `run.sh`. Lands at 54/54 green on Docker Desktop with the opt-in
+  `run.sh`. Now at 70/70 green across 5 scenarios (v4-only, v6-only,
+  both, none, dhcpv6-stateful) on Docker Desktop with the opt-in
   `E2E_BRIDGE_FLOOD_FIX=1` (sets `bridge-nf-call-iptables=0` to undo
-  Docker's default iptables-FORWARD drop of bridge broadcasts), and
-  50/54 without — the 4 deltas are exactly the v4 DHCP path that
-  needs that workaround. Real Linux hosts don't need the flag (see
-  next item).
+  Docker's default iptables-FORWARD drop of bridge broadcasts).
+  Real Linux hosts don't need the flag (see next item).
 - [x] Implement service-anchor mode (SPEC §2.6, ARCHITECTURE role 2):
   `cmd/anchord` dispatches on `ANCHORD_MODE`, `internal/serviceanchor`
   package, F-24..F-29 contract honoured, e2e compose's smtp-anchor
@@ -152,15 +157,22 @@ project genesis:
   release gate blocks tags that aren't on main or whose recorded
   hash is stale.
 - [ ] Real-host validation: run the e2e harness on an actual Linux
-  host with a physical VLAN sub-interface and confirm 54/54 without
+  host with a physical VLAN sub-interface and confirm 70/70 without
   `E2E_BRIDGE_FLOOD_FIX`. Closes the env-quirk caveat for good.
-- [ ] Decide on Prometheus metrics surface (which counters/gauges).
-  Likely candidates: reconcile latency, DHCP lease age, dnat_tcp/udp
-  map size, conntrack flushes, DHCP-client restart count. Needs a SPEC
-  decision before implementation.
-- [ ] Health endpoint shape (`/healthz` returns what exactly?).
-  Liveness vs. readiness; what counts as "ready" — tables installed?
-  first lease? first reconcile? Needs a SPEC decision.
+  This is the **last** item before a v1 tag.
+- [x] Prometheus metrics surface decided + implemented (SPEC §2.7,
+  F-30..F-32, N-5). 12 metrics across both modes, bounded label
+  cardinality, custom collector for `dhcp_lease_remaining_seconds`
+  so the gauge decays at scrape time. Listener is loopback-only by
+  default (`ANCHORD_METRICS_ADDR=127.0.0.1:9090`) so the LAN-facing
+  macvlan never sees it.
+- [x] Health endpoint shape decided + implemented (SPEC §2.8,
+  F-33..F-36). `/healthz` is pure liveness (always 200);
+  `/readyz` is mode-specific — network-anchor needs nft tables
+  installed AND first reconcile complete; service-anchor needs at
+  least one default route installed. DHCP lease state is **not** a
+  readiness gate (DNAT path is iface-bound; the `none`-DHCP scenario
+  must reach ready). Both endpoints share the metrics listener.
 - [x] DHCPv6 feature parity. `dhcp.Supervisor` runs pure-Go v4 + v6
   client goroutines in parallel under a shared child context (see
   `runClients` / `runFamily`). Hostname/FQDN options are passed via

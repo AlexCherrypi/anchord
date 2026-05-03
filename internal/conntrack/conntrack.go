@@ -3,10 +3,11 @@
 // being routed to a backend that no longer exists when a container
 // gets a new IP.
 //
-// We shell out to `conntrack -D` for v0.1 — the kernel API works via
-// netlink (NFNL_SUBSYS_CTNETLINK) and there are Go bindings, but the
-// volume here is low (one flush per backend change) and the conntrack
-// CLI ships in every distro that runs nftables.
+// We shell out to `conntrack -D` rather than going through netlink
+// (NFNL_SUBSYS_CTNETLINK) — the volume here is low (one flush per
+// backend change), the conntrack CLI ships in every distro that
+// runs nftables, and a Go netlink binding would only buy us a few
+// hundred microseconds we don't need.
 package conntrack
 
 import (

@@ -2,9 +2,11 @@
 
 ## Supported versions
 
-anchord is **pre-alpha**. There are no formal supported versions yet;
-the only intended target is `main` and the current `:latest` container
-image. Once a v1.0 line exists, this section will be updated.
+anchord is in **beta** (feature-complete, awaiting real-host
+validation before a v1 tag). There are no formal supported version
+lines yet; the only intended target is `main` and the current
+`:latest` container image. Once a v1.0 line exists, this section
+will be updated.
 
 ## Reporting a vulnerability
 
