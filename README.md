@@ -168,30 +168,28 @@ invariants the code relies on — read [ARCHITECTURE.md](ARCHITECTURE.md).
 The sketch below is the one-screen version.
 
 ```
-        External LAN (VLAN eth0.42)
-                    │
-                    │  macvlan + DHCP — project gets one IP
-                    ▼
-         ┌──────────────────────┐
-         │  anchord             │   network-anchor mode:
-         │  (macvlan + nftables)│   macvlan child + DNAT-by-map +
-         └──────────┬───────────┘   masquerade on egress
-                    │
-   ════════════ transit-bridge ════════════   (Docker, internal: true)
-                    │
-            ┌───────┴────────┐
-            │                │
-        ┌───┴────┐       ┌───┴────┐
-        │ smtp-  │       │ imap-  │           service-anchors:
-        │ anchor │       │ anchor │           namespace owners
-        └───┬────┘       └───┬────┘
-          postfix          dovecot            application containers
-                                              join via network_mode:
-                                              service:<anchor>
-            │                │
-   ════════════ backend-bridge ════════════   (Docker, internal: true)
-                    │
-                mysql, redis, …
+           External LAN (VLAN eth0.42)
+                        │
+                        │  macvlan + DHCP
+                        ▼
+             ┌──────────────────────┐
+             │  anchord             │
+             │  (macvlan + nftables)│
+             └──────────┬───────────┘
+                        │
+    ════════════ transit-bridge ════════════
+                        │
+                ┌───────┴───────┐
+                │               │
+            ┌───┴────┐      ┌───┴────┐
+            │ smtp-  │      │ imap-  │
+            │ anchor │      │ anchor │
+            └───┬────┘      └───┬────┘
+             postfix         dovecot
+                │               │
+    ════════════ backend-bridge ════════════
+                        │
+                 mysql, redis, …
 ```
 
 Three layers, by design:
