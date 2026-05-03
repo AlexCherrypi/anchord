@@ -172,10 +172,8 @@ flowchart TD
     %% Three roles in vertical layers: LAN -> network-anchor ->
     %% transit-bridge -> service-anchors (+ app containers joined
     %% via netns share) -> backend-bridge -> DBs.
-    %%
-    %% Edge styles: solid arrow = traffic flow,
-    %% thick arrow = membership in a Docker bridge,
-    %% dashed arrow = netns share via network_mode service.
+    %% Edge styles: solid = traffic flow, thick = bridge membership,
+    %% dashed = netns share via network_mode service.
 
     LAN[External LAN - VLAN eth0.42]
     Anchord[anchord network-anchor mode<br>macvlan + nftables<br>DNAT-by-map + masquerade]
