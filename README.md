@@ -169,27 +169,27 @@ The sketch below is the one-screen version.
 
 ```
            External LAN (VLAN eth0.42)
-                        │
-                        │  macvlan + DHCP
-                        ▼
-             ┌──────────────────────┐
-             │  anchord             │
-             │  (macvlan + nftables)│
-             └──────────┬───────────┘
-                        │
-    ════════════ transit-bridge ════════════
-                        │
-                ┌───────┴───────┐
-                │               │
-            ┌───┴────┐      ┌───┴────┐
-            │ smtp-  │      │ imap-  │
-            │ anchor │      │ anchor │
-            └───┬────┘      └───┬────┘
+                        |
+                        |  macvlan + DHCP
+                        v
+             +----------------------+
+             |  anchord             |
+             |  (macvlan + nftables)|
+             +----------+-----------+
+                        |
+    ============ transit-bridge ============
+                        |
+                +-------+-------+
+                |               |
+            +---+----+      +---+----+
+            | smtp-  |      | imap-  |
+            | anchor |      | anchor |
+            +---+----+      +---+----+
              postfix         dovecot
-                │               │
-    ════════════ backend-bridge ════════════
-                        │
-                 mysql, redis, …
+                |               |
+    ============ backend-bridge ============
+                        |
+                 mysql, redis, ...
 ```
 
 Three layers, by design:
