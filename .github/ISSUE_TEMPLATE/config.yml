@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/AlexCherrypi/anchord/security/advisories/new
+    about: Use private vulnerability reporting — do not open a public issue for security-sensitive bugs.

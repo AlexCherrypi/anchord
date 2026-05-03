@@ -1,8 +1,8 @@
 # Contributing to anchord
 
-Thanks for your interest. anchord is pre-alpha, but contributions are
-very welcome — especially real-host validation, edge-case bug reports,
-and SPEC-level discussion before code.
+Thanks for your interest. anchord is feature-complete and in beta;
+contributions are very welcome — especially real-host validation,
+edge-case bug reports, and SPEC-level discussion before code.
 
 ## Before you start
 

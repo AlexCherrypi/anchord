@@ -1,0 +1,49 @@
+name: Proposal / discussion
+description: Discuss a change before writing code (env-var changes, mental-model changes, anything that touches SPEC).
+title: "[proposal] "
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        anchord has a tight [SPEC](../SPEC.md) and explicit anti-patterns
+        in [CONTEXT.md](../CONTEXT.md). For non-trivial changes — adding
+        env vars, changing the mental model, or anything that could touch
+        the SPEC — please open this issue **before writing code**, so we
+        can align early.
+
+        Routine refactors, test additions, docs fixes, and obvious bug
+        fixes can go straight to a PR.
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What problem does this solve? Who hits it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change? If multiple options, which would you pick and why?
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec_context
+    attributes:
+      label: SPEC / CONTEXT impact
+      description: |
+        Does this touch [SPEC.md](../SPEC.md) (functional requirements,
+        acceptance scenarios) or [CONTEXT.md](../CONTEXT.md) (anti-patterns)?
+        If so, which sections, and how?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you think about and rule out, and why?

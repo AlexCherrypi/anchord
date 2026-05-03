@@ -1,0 +1,75 @@
+name: Bug report
+description: Something anchord does, but shouldn't (or doesn't, but should).
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. The more of this you fill in, the faster it gets
+        fixed. For security-sensitive bugs, **don't open a public issue** —
+        use [private vulnerability reporting](https://github.com/AlexCherrypi/anchord/security/advisories/new).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you ran
+      description: Compose snippet, env vars, the command that triggered it.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: |
+        anchord's JSON logs (slog output is structured), error messages,
+        and `nft list ruleset` output if NAT is involved.
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel version
+      placeholder: "uname -a"
+    validations:
+      required: true
+
+  - type: input
+    id: docker
+    attributes:
+      label: Docker version
+      placeholder: "docker version --format '{{.Server.Version}}'"
+    validations:
+      required: true
+
+  - type: input
+    id: image
+    attributes:
+      label: anchord image / commit
+      placeholder: "ghcr.io/alexcherrypi/anchord:<tag> or commit sha"
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host OS
+      placeholder: "Debian 12 / Ubuntu 24.04 / WSL2 / Docker Desktop / ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Anything you tried that did or didn't help.
