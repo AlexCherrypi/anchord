@@ -24,13 +24,13 @@ on another, and so on — but with the operational ergonomics of Compose.
 
 ## Status
 
-**Pre-alpha, but it works.** Both modes implemented, observability
+**Beta, feature-complete.** Both modes implemented, observability
 (metrics + health) wired in. 167/167 across unit tests + e2e covering
 all four DHCP scenarios plus stateful DHCPv6 (the auto-generated
 report at the bottom of this README is the release-readiness signal).
-Outstanding before a v1 tag: real-host validation on a Linux box with
-a physical VLAN sub-interface. Use as a starting point, not in
-production.
+One thing outstanding before a v1 tag: real-host validation on a
+Linux box with a physical VLAN sub-interface — to confirm the Docker
+Desktop bridge-flood workaround isn't needed in production.
 
 *(Designed in a bathtub conversation. Has held up better than that has any
 right to.)*
