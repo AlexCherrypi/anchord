@@ -25,9 +25,13 @@ import (
 	"sync"
 	"syscall"
 
+	"net/http"
+
 	"github.com/AlexCherrypi/anchord/internal/config"
 	"github.com/AlexCherrypi/anchord/internal/dhcp"
 	"github.com/AlexCherrypi/anchord/internal/discovery"
+	"github.com/AlexCherrypi/anchord/internal/health"
+	"github.com/AlexCherrypi/anchord/internal/metrics"
 	"github.com/AlexCherrypi/anchord/internal/nat"
 	"github.com/AlexCherrypi/anchord/internal/reconciler"
 	"github.com/AlexCherrypi/anchord/internal/serviceanchor"
@@ -117,6 +121,12 @@ func runNetworkAnchor(ctx context.Context) error {
 	}
 	setupLogger(cfg.LogLevel)
 
+	tracker := health.NewTracker()
+	startMetrics(ctx, cfg.MetricsAddr, map[string]http.Handler{
+		"/healthz": health.LivenessHandler(),
+		"/readyz":  health.NetworkAnchorReadinessHandler(tracker),
+	})
+
 	slog.Info("anchord starting (network-anchor mode)",
 		"project", cfg.ComposeProject,
 		"vlan_parent", cfg.VLANParent,
@@ -131,6 +141,7 @@ func runNetworkAnchor(ctx context.Context) error {
 	if err := natMgr.Setup(); err != nil {
 		return fmt.Errorf("nat setup: %w", err)
 	}
+	tracker.MarkTablesInstalled()
 	defer func() {
 		if err := natMgr.Teardown(); err != nil {
 			slog.Warn("nat teardown", "err", err)
@@ -195,6 +206,7 @@ func runNetworkAnchor(ctx context.Context) error {
 
 	// 5. Reconciler — the main loop.
 	rec := reconciler.New(natMgr)
+	rec.OnReconciled = tracker.MarkReconciled
 	return rec.Run(cancelCtx, disc.Updates())
 }
 
@@ -208,8 +220,33 @@ func runServiceAnchor(ctx context.Context) error {
 	}
 	setupLogger(cfg.LogLevel)
 
+	tracker := health.NewTracker()
+	startMetrics(ctx, cfg.MetricsAddr, map[string]http.Handler{
+		"/healthz": health.LivenessHandler(),
+		"/readyz":  health.ServiceAnchorReadinessHandler(tracker),
+	})
+
 	mgr := serviceanchor.New(cfg)
+	mgr.OnRouteInstalled = tracker.MarkRouteInstalled
 	return mgr.Run(ctx)
+}
+
+// startMetrics spawns the HTTP listener if addr is non-empty. The
+// listener serves /metrics and any extra paths supplied by the
+// caller (typically /healthz and /readyz).
+//
+// A bind failure is logged at warn but does not abort startup — the
+// listener carries observability, not critical-path behaviour (SPEC F-32).
+func startMetrics(ctx context.Context, addr string, extra map[string]http.Handler) {
+	if addr == "" {
+		slog.Info("metrics + health listener disabled (ANCHORD_METRICS_ADDR=\"\")")
+		return
+	}
+	go func() {
+		if err := metrics.Serve(ctx, addr, extra); err != nil {
+			slog.Warn("metrics listener exited", "addr", addr, "err", err)
+		}
+	}()
 }
 
 // detectSharedNetwork inspects the anchord container itself to find

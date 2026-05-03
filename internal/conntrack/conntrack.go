@@ -14,6 +14,8 @@ import (
 	"log/slog"
 	"net"
 	"os/exec"
+
+	"github.com/AlexCherrypi/anchord/internal/metrics"
 )
 
 // runner is the package-level seam that runs the conntrack subprocess.
@@ -33,6 +35,11 @@ func FlushDestination(ctx context.Context, ip net.IP) {
 	if ip == nil {
 		return
 	}
+	fam := "v4"
+	if ip.To4() == nil {
+		fam = "v6"
+	}
+	metrics.ConntrackFlushes.WithLabelValues(fam).Inc()
 	out, err := runner(ctx, "conntrack", "-d", ip.String(), "-D")
 	if err != nil {
 		// `conntrack -D` exits non-zero with code 1 when no entries

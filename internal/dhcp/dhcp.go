@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AlexCherrypi/anchord/internal/metrics"
+
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
@@ -277,11 +279,18 @@ func (s *Supervisor) runClients(ctx context.Context) error {
 // DHCP-protocol error it logs and backs off, then retries — the loop
 // only exits on context cancel.
 func (s *Supervisor) runFamily(ctx context.Context, family int) {
+	famLabel := familyLabel(family)
+	defer metrics.DHCPLeaseRemaining.Clear(famLabel)
 	backoff := time.Second
+	first := true
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		if !first {
+			metrics.DHCPClientRestarts.WithLabelValues(famLabel).Inc()
+		}
+		first = false
 		var err error
 		if family == 4 {
 			err = s.runV4Once(ctx)
@@ -291,12 +300,22 @@ func (s *Supervisor) runFamily(ctx context.Context, family int) {
 		if ctx.Err() != nil {
 			return
 		}
+		metrics.DHCPAcquired.WithLabelValues(famLabel, "error").Inc()
 		slog.Warn("dhcp client lost lease, retrying",
 			"family", family, "err", err, "backoff", backoff)
 		if !s.sleepBackoff(ctx, &backoff) {
 			return
 		}
 	}
+}
+
+// familyLabel maps the integer family to the "v4"/"v6" string used by
+// the Prometheus surface (see SPEC F-31).
+func familyLabel(family int) string {
+	if family == 6 {
+		return "v6"
+	}
+	return "v4"
 }
 
 // runV4Once runs one full lease lifecycle: DORA, apply, renew loop.
@@ -320,6 +339,8 @@ func (s *Supervisor) runV4Once(ctx context.Context) error {
 	if err := s.applyV4Lease(lease.ACK); err != nil {
 		return fmt.Errorf("apply v4 lease: %w", err)
 	}
+	metrics.DHCPAcquired.WithLabelValues("v4", "ok").Inc()
+	metrics.DHCPLeaseRemaining.Set("v4", time.Now().Add(leaseTime(lease.ACK)))
 	// Cleanup must happen RELEASE -> unapply (LIFO of declaration: the
 	// release packet is built from the freshest `lease`, then the IP
 	// is removed from the iface). We capture `lease` by reference so
@@ -361,6 +382,8 @@ func (s *Supervisor) runV4Once(ctx context.Context) error {
 			return fmt.Errorf("apply renewed v4 lease: %w", err)
 		}
 		lease = newLease
+		metrics.DHCPAcquired.WithLabelValues("v4", "ok").Inc()
+		metrics.DHCPLeaseRemaining.Set("v4", time.Now().Add(leaseTime(lease.ACK)))
 		slog.Debug("dhcp v4 lease renewed",
 			"iface", s.ifaceName,
 			"ip", lease.ACK.YourIPAddr,
@@ -507,6 +530,8 @@ func (s *Supervisor) runV6Once(ctx context.Context) error {
 		return fmt.Errorf("apply v6 addrs: %w", err)
 	}
 	defer s.unapplyV6Addrs(addrs)
+	metrics.DHCPAcquired.WithLabelValues("v6", "ok").Inc()
+	metrics.DHCPLeaseRemaining.Set("v6", time.Now().Add(v6LeaseLifetime(reply)))
 	// We don't send DHCPRELEASE for v6 here — most servers honour the
 	// SOLICIT/REQUEST without persistent-binding, and a release on
 	// shutdown is not as important as for v4 because IPv6 address
@@ -529,6 +554,31 @@ func (s *Supervisor) runV6Once(ctx context.Context) error {
 		case <-time.After(time.Hour):
 		}
 	}
+}
+
+// v6LeaseLifetime returns the smallest non-zero ValidLifetime across
+// all IA addresses in the reply, or 1 hour if no usable lifetime is
+// found (matches the supervisor's existing 1h re-solicit cadence).
+// The smallest is the right pick — that's when *something* expires
+// and we'd start to lose addresses.
+func v6LeaseLifetime(msg *dhcpv6.Message) time.Duration {
+	const fallback = time.Hour
+	var best time.Duration
+	for _, iana := range msg.Options.IANA() {
+		for _, iaAddr := range iana.Options.Addresses() {
+			lt := iaAddr.ValidLifetime
+			if lt <= 0 {
+				continue
+			}
+			if best == 0 || lt < best {
+				best = lt
+			}
+		}
+	}
+	if best == 0 {
+		return fallback
+	}
+	return best
 }
 
 // extractV6Addrs returns the IPv6 addresses contained in IA_NA options

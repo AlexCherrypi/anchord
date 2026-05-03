@@ -108,6 +108,83 @@ on `internal: true` Docker bridges (see F-13a).
 - **F-29** On SIGTERM/SIGINT, service-anchor mode removes the default
   route(s) it installed and exits cleanly.
 
+### 2.7 Observability
+
+Both modes expose a Prometheus-format metrics endpoint over HTTP.
+Same listener will host `/healthz` and `/readyz` (see §2.8) — one
+port, three paths.
+
+- **F-30** Each anchord container (network-anchor or service-anchor)
+  serves `/metrics` in Prometheus text exposition format on a single
+  configurable address. Default `127.0.0.1:9090` — loopback-only,
+  to keep the surface off the LAN-facing macvlan child. Operators
+  who want project-internal scraping set `ANCHORD_METRICS_ADDR=:9090`
+  (or a specific transit IP). Setting `ANCHORD_METRICS_ADDR=""`
+  disables the listener entirely.
+- **F-31** All anchord-emitted metrics use the `anchord_` prefix.
+  Label cardinality is bounded — labels are restricted to
+  `family ∈ {v4,v6}`, `proto ∈ {tcp,udp}`, `outcome ∈ {ok,error}`,
+  `result ∈ {ok,error}`, `source ∈ {event,poll}`. No per-container,
+  per-IP, or per-port labels.
+- **F-32** A failure to bind the metrics listener is logged at warn
+  but does not abort startup of the data plane. Metrics are
+  observability, not critical path.
+
+The required surface (Prometheus names, types, labels):
+
+Network-anchor mode:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `anchord_reconcile_duration_seconds` | histogram | — |
+| `anchord_reconcile_total` | counter | `result` |
+| `anchord_dhcp_lease_remaining_seconds` | gauge | `family` |
+| `anchord_dhcp_acquired_total` | counter | `family`, `outcome` |
+| `anchord_dhcp_client_restarts_total` | counter | `family` |
+| `anchord_dnat_entries` | gauge | `family`, `proto` |
+| `anchord_conntrack_flushes_total` | counter | `family` |
+| `anchord_docker_events_total` | counter | `source` |
+| `anchord_build_info` | gauge (constant 1) | `version`, `commit` |
+
+Service-anchor mode:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `anchord_gateway_resolve_total` | counter | `family`, `outcome` |
+| `anchord_gateway_route_replaces_total` | counter | `family` |
+| `anchord_default_route_present` | gauge (0/1) | `family` |
+| `anchord_build_info` | gauge (constant 1) | `version`, `commit` |
+
+### 2.8 Health endpoints
+
+Both modes serve `/healthz` (liveness) and `/readyz` (readiness) on
+the same HTTP listener as `/metrics`. Disabling the metrics listener
+(`ANCHORD_METRICS_ADDR=""`) disables health endpoints too — they
+share one socket by design.
+
+- **F-33** `/healthz` returns `200 OK` with body `ok` whenever the
+  process is running and serving HTTP. It is a pure liveness signal:
+  it does not check downstream state, so a stuck reconciler or a
+  lost lease does NOT flip it. Liveness probes failing on transient
+  data-plane issues would cause restart storms — wrong shape.
+- **F-34** `/readyz` (network-anchor) returns `200 OK` with body `ready`
+  iff (a) the nftables tables have been installed AND (b) at least
+  one Reconcile has completed successfully. While not ready, returns
+  `503 Service Unavailable` with a body listing the unmet conditions.
+  DHCP lease state is **not** part of readiness — the DNAT path is
+  interface-bound and works regardless of external IP, and the
+  `none`-DHCP scenario must be reachable to "ready".
+- **F-35** `/readyz` (service-anchor) returns `200 OK` with body `ready`
+  iff at least one default route (v4 OR v6) has been successfully
+  installed. While not ready, returns `503` with the unmet
+  conditions. This is the gate Compose `depends_on:
+  condition: service_healthy` needs so an app container that joins
+  via `network_mode: service:<anchor>` does not start before egress
+  works.
+- **F-36** Both endpoints respond in `text/plain`; format is
+  newline-separated `<key>: <value>` lines. JSON is overkill for two
+  bits.
+
 ## 3. Non-functional requirements
 
 - **N-1** The container image is ≤ 20 MB compressed.
@@ -116,6 +193,9 @@ on `internal: true` Docker bridges (see F-13a).
   ≤ 500 ms p99 under normal load.
 - **N-4** No external runtime dependencies beyond the host kernel
   (≥ 4.18) and Docker daemon (≥ 20.10).
+- **N-5** The metrics endpoint adds ≤ 5 MB to RSS at idle. Process
+  Go-runtime metrics are emitted by `client_golang`; no
+  additional collectors or exporters bundled.
 
 ## 4. Explicit non-goals (v0.1 → v1.0)
 

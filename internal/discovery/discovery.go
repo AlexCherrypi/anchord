@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/AlexCherrypi/anchord/internal/labels"
+	"github.com/AlexCherrypi/anchord/internal/metrics"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -129,6 +130,7 @@ func (d *Discoverer) pollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			metrics.DockerEvents.WithLabelValues("poll").Inc()
 			if err := d.snapshot(ctx); err != nil {
 				slog.Warn("poll snapshot failed", "err", err)
 			}
@@ -156,6 +158,7 @@ func (d *Discoverer) eventLoop(ctx context.Context) error {
 		case msg := <-msgs:
 			// We don't filter by action — any container event in our
 			// project is a reason to re-scan. Cheap.
+			metrics.DockerEvents.WithLabelValues("event").Inc()
 			slog.Debug("docker event", "action", msg.Action, "actor", msg.Actor.ID[:12])
 			if err := d.snapshot(ctx); err != nil {
 				slog.Warn("event-driven snapshot failed", "err", err)

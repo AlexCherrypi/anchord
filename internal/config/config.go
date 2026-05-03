@@ -55,6 +55,11 @@ type NetworkAnchor struct {
 
 	// LogLevel: debug, info, warn, error.
 	LogLevel string
+
+	// MetricsAddr is the listen address for the Prometheus metrics
+	// endpoint. Default ":9090". Empty disables the listener.
+	// (Same listener will host /healthz and /readyz when those land.)
+	MetricsAddr string
 }
 
 // ServiceAnchor holds resolved settings for the service-anchor mode.
@@ -69,6 +74,10 @@ type ServiceAnchor struct {
 
 	// LogLevel: debug, info, warn, error.
 	LogLevel string
+
+	// MetricsAddr is the listen address for the Prometheus metrics
+	// endpoint. Default ":9090". Empty disables the listener.
+	MetricsAddr string
 }
 
 // LoadNetworkAnchor reads network-anchor configuration from the environment.
@@ -80,6 +89,7 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 		DHCPHostname:   os.Getenv("ANCHORD_DHCP_HOSTNAME"),
 		DockerHost:     getenvDefault("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		LogLevel:       getenvDefault("ANCHORD_LOG_LEVEL", "info"),
+		MetricsAddr:    metricsAddrFromEnv(),
 	}
 
 	if c.ComposeProject == "" {
@@ -125,6 +135,7 @@ func LoadServiceAnchor() (*ServiceAnchor, error) {
 	c := &ServiceAnchor{
 		GatewayHostname: getenvDefault("ANCHORD_GATEWAY_HOSTNAME", "anchord"),
 		LogLevel:        getenvDefault("ANCHORD_LOG_LEVEL", "info"),
+		MetricsAddr:     metricsAddrFromEnv(),
 	}
 	var err error
 	c.ResolveInterval, err = parseDuration("ANCHORD_GATEWAY_RESOLVE_INTERVAL", 5*time.Second)
@@ -155,6 +166,25 @@ func getenvDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// metricsAddrFromEnv resolves ANCHORD_METRICS_ADDR with three states:
+// unset -> default "127.0.0.1:9090"; set to a value -> that value; set
+// to the empty string -> "" (disabled). Distinguishing "unset" from
+// "explicit empty" requires LookupEnv rather than getenvDefault.
+//
+// Default is loopback-only (not :9090) to keep the metrics surface
+// off the macvlan parent — binding 0.0.0.0 would publish metrics on
+// the LAN-facing anchord-ext. Operators who want project-internal
+// scraping set ":9090" explicitly. In service-anchor mode, app
+// containers share the netns via `network_mode: service:`, so
+// 127.0.0.1:9090 IS reachable from those containers.
+func metricsAddrFromEnv() string {
+	v, ok := os.LookupEnv("ANCHORD_METRICS_ADDR")
+	if !ok {
+		return "127.0.0.1:9090"
+	}
+	return v
 }
 
 func parseDuration(key string, def time.Duration) (time.Duration, error) {

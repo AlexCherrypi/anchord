@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,10 @@ func clearAnchordEnv(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
+	// MetricsAddr uses LookupEnv (unset != empty), so we have to
+	// explicitly unset it for "default" tests rather than just blanking.
+	t.Setenv("ANCHORD_METRICS_ADDR", "")
+	_ = os.Unsetenv("ANCHORD_METRICS_ADDR")
 }
 
 func TestDeriveMAC(t *testing.T) {
@@ -114,6 +119,9 @@ func TestLoad_DefaultsAndDerivations(t *testing.T) {
 	}
 	if cfg.DockerHost != "unix:///var/run/docker.sock" {
 		t.Errorf("DockerHost default: %q", cfg.DockerHost)
+	}
+	if cfg.MetricsAddr != "127.0.0.1:9090" {
+		t.Errorf("MetricsAddr default: %q", cfg.MetricsAddr)
 	}
 	want := deriveMAC("mailcow").String()
 	if cfg.ExtMAC.String() != want {
@@ -257,6 +265,31 @@ func TestLoadServiceAnchor_RejectsZeroInterval(t *testing.T) {
 	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "0")
 	if _, err := LoadServiceAnchor(); err == nil {
 		t.Fatal("expected error for zero interval")
+	}
+}
+
+func TestMetricsAddrFromEnv(t *testing.T) {
+	cases := []struct {
+		name string
+		set  bool
+		val  string
+		want string
+	}{
+		{"unset → loopback default", false, "", "127.0.0.1:9090"},
+		{"set → value", true, ":9090", ":9090"},
+		{"explicit empty → disabled", true, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("ANCHORD_METRICS_ADDR", tc.val)
+			} else {
+				_ = os.Unsetenv("ANCHORD_METRICS_ADDR")
+			}
+			if got := metricsAddrFromEnv(); got != tc.want {
+				t.Errorf("got %q want %q", got, tc.want)
+			}
+		})
 	}
 }
 

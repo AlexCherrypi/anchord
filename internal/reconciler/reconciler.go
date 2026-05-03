@@ -14,16 +14,24 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/AlexCherrypi/anchord/internal/conntrack"
 	"github.com/AlexCherrypi/anchord/internal/discovery"
 	"github.com/AlexCherrypi/anchord/internal/labels"
+	"github.com/AlexCherrypi/anchord/internal/metrics"
 	"github.com/AlexCherrypi/anchord/internal/nat"
 )
 
 // Reconciler is the glue between Discovery and the NAT manager.
 type Reconciler struct {
 	nat *nat.Manager
+
+	// OnReconciled, if set, is invoked after every successful apply.
+	// Used by main to flip the readiness Tracker once the data plane
+	// has produced its first map (SPEC F-34). Idempotent on the
+	// caller side — we don't bother dedup'ing here.
+	OnReconciled func()
 
 	mu   sync.Mutex
 	last map[key]net.IP // last successfully applied
@@ -51,8 +59,17 @@ func (r *Reconciler) Run(ctx context.Context, updates <-chan discovery.State) er
 			if !ok {
 				return nil
 			}
-			if err := r.apply(ctx, st); err != nil {
+			start := time.Now()
+			err := r.apply(ctx, st)
+			metrics.ReconcileDuration.Observe(time.Since(start).Seconds())
+			if err != nil {
+				metrics.ReconcileTotal.WithLabelValues("error").Inc()
 				slog.Error("reconcile failed", "err", err)
+			} else {
+				metrics.ReconcileTotal.WithLabelValues("ok").Inc()
+				if r.OnReconciled != nil {
+					r.OnReconciled()
+				}
 			}
 		}
 	}
@@ -78,6 +95,7 @@ func (r *Reconciler) apply(ctx context.Context, st discovery.State) error {
 			if err := r.nat.SetMap(fam, proto, entries); err != nil {
 				return err
 			}
+			metrics.DnatEntries.WithLabelValues(fam.String(), proto).Set(float64(len(entries)))
 		}
 	}
 

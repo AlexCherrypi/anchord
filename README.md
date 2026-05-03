@@ -24,12 +24,12 @@ on another, and so on — but with the operational ergonomics of Compose.
 
 ## Status
 
-**Pre-alpha, but it works.** Both modes implemented. 152/152 across unit
-tests + e2e covering all four DHCP scenarios plus stateful DHCPv6 (the
-auto-generated report at the bottom of this README is the release-readiness
-signal). Outstanding before a v1 tag: real-host validation on a Linux box
-with a physical VLAN sub-interface, plus SPEC decisions on the metrics
-surface and the health-endpoint shape. Use as a starting point, not in
+**Pre-alpha, but it works.** Both modes implemented, observability
+(metrics + health) wired in. 167/167 across unit tests + e2e covering
+all four DHCP scenarios plus stateful DHCPv6 (the auto-generated
+report at the bottom of this README is the release-readiness signal).
+Outstanding before a v1 tag: real-host validation on a Linux box with
+a physical VLAN sub-interface. Use as a starting point, not in
 production.
 
 *(Designed in a bathtub conversation. Has held up better than that has any
@@ -162,6 +162,11 @@ spelling, `command: [service-anchor]` does the same as setting `ANCHORD_MODE`.
 
 ## Architecture
 
+For the full picture — the three-role model (network-anchor,
+service-anchors, backends), how traffic flows end-to-end, and the
+invariants the code relies on — read [ARCHITECTURE.md](ARCHITECTURE.md).
+The sketch below is the one-screen version.
+
 ```
                     VLAN (eth0.42)
                           │
@@ -234,6 +239,7 @@ All via environment variables.
 |------------------------------|----------|--------------------|-------|
 | `ANCHORD_MODE`               | no       | `network-anchor`   | `network-anchor` or `service-anchor`. `command: [service-anchor]` is an equivalent override. |
 | `ANCHORD_LOG_LEVEL`          | no       | `info`             | `debug`/`info`/`warn`/`error` |
+| `ANCHORD_METRICS_ADDR`       | no       | `127.0.0.1:9090`   | Prometheus `/metrics` listen address. Loopback-only by default to avoid LAN exposure on the macvlan; set `:9090` to scrape from other compose services. `""` disables. |
 
 ### Network-anchor mode
 
@@ -283,6 +289,42 @@ auto-generated **Test report** block at the bottom of this README on
 green. See [TESTING.md](TESTING.md) for the per-platform commands and
 the release-gate contract.
 
+## Observability
+
+Both modes serve `/metrics`, `/healthz` and `/readyz` on the same
+listener (default `127.0.0.1:9090`, loopback-only so the LAN-facing
+macvlan never sees it; set `ANCHORD_METRICS_ADDR=:9090` for
+project-wide scraping or `""` to disable). The surface is small and
+deliberately bounded — see [SPEC §2.7](SPEC.md) for the full table —
+the highlights operators usually want to alert on:
+
+- `anchord_dhcp_lease_remaining_seconds{family}` — alert when this
+  drops below your renewal window. Recomputed at scrape time.
+- `anchord_reconcile_total{result}` — error rate of the main loop.
+- `anchord_reconcile_duration_seconds` — verifies SPEC N-3 (≤ 500 ms p99).
+- `anchord_dnat_entries{family,proto}` — sanity gauge; spikes or drops
+  are a strong signal something is off.
+- `anchord_gateway_route_replaces_total{family}` (service-anchor) —
+  how often the network-anchor's transit IP changed under us.
+
+Label cardinality is bounded by design (no per-container, per-IP, or
+per-port labels) — that would leak the project's internal structure
+across the metrics surface, which contradicts the "one project = one
+server" model.
+
+### Health endpoints
+
+Same listener, plain text:
+
+| Path | Code | When |
+|---|---|---|
+| `/healthz` | always `200 ok` | Process is up and serving HTTP. Pure liveness signal — does **not** flip on data-plane issues. |
+| `/readyz` (network-anchor) | `200 ready` | Once nftables tables are installed AND the first reconcile has completed. DHCP lease state is not part of readiness — the DNAT path works without one. |
+| `/readyz` (service-anchor) | `200 ready` | Once at least one default route (v4 or v6) has been installed. Pair with a Docker `HEALTHCHECK` so app containers joining via `network_mode: service:<anchor>` wait for egress. |
+
+Both `/readyz` variants return `503` with the unmet conditions in the
+body while not ready.
+
 ## Caveats and known limitations
 
 - **Kernel ≥ 4.18** required for atomic nftables map replaces.
@@ -311,8 +353,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-03T01:50:12Z
-- **Code hash:** `sha256:00b4e666100b74c2b122db5751d4962b0ca8d7dc4ab38350beda3655ab8c84ae`
+- **Last verified:** 2026-05-03T02:34:43Z
+- **Code hash:** `sha256:527da986e82aa7d27c925a485c00957f1a002467fdc6b72a253343f8eceabf48`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -320,12 +362,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 82 | 0 | 0 | 82 |
+| Go unit tests | 97 | 0 | 0 | 97 |
 | E2E (test/e2e, 5 scenarios) | 70 | 0 | — | 70 |
-| **All tests** | **152** | **0** | **0** | **152** |
+| **All tests** | **167** | **0** | **0** | **167** |
 
 <details>
-<summary>Go unit tests &mdash; 82/82 passed</summary>
+<summary>Go unit tests &mdash; 97/97 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -351,6 +393,9 @@ release-readiness signal.
 | `internal/config` | `TestLoad_ProjectOverridesCompose` | ✓ |
 | `internal/config` | `TestLoad_RequiresProject` | ✓ |
 | `internal/config` | `TestLoad_RequiresVLANParent` | ✓ |
+| `internal/config` | `TestMetricsAddrFromEnv/explicit_empty_→_disabled` | ✓ |
+| `internal/config` | `TestMetricsAddrFromEnv/set_→_value` | ✓ |
+| `internal/config` | `TestMetricsAddrFromEnv/unset_→_loopback_default` | ✓ |
 | `internal/config` | `TestParseDuration/duration_string` | ✓ |
 | `internal/config` | `TestParseDuration/empty_uses_default` | ✓ |
 | `internal/config` | `TestParseDuration/invalid` | ✓ |
@@ -382,6 +427,12 @@ release-readiness signal.
 | `internal/discovery` | `TestRuleLess` | ✓ |
 | `internal/discovery` | `TestStateEqual` | ✓ |
 | `internal/discovery` | `TestTrimName` | ✓ |
+| `internal/health` | `TestLiveness_AlwaysOK/fresh_tracker` | ✓ |
+| `internal/health` | `TestLiveness_AlwaysOK/tracker_with_state` | ✓ |
+| `internal/health` | `TestMarks_AreIdempotent` | ✓ |
+| `internal/health` | `TestNetworkAnchorReadiness_ReconcileAloneNotReady` | ✓ |
+| `internal/health` | `TestNetworkAnchorReadiness_StateMachine` | ✓ |
+| `internal/health` | `TestServiceAnchorReadiness_StateMachine` | ✓ |
 | `internal/labels` | `TestParse/absent` | ✓ |
 | `internal/labels` | `TestParse/bad_port` | ✓ |
 | `internal/labels` | `TestParse/bad_proto` | ✓ |
@@ -391,6 +442,12 @@ release-readiness signal.
 | `internal/labels` | `TestParse/port_zero` | ✓ |
 | `internal/labels` | `TestParse/single_tcp` | ✓ |
 | `internal/labels` | `TestParse/v6_off` | ✓ |
+| `internal/metrics` | `TestLeaseRemaining_ClampsNegative` | ✓ |
+| `internal/metrics` | `TestLeaseRemaining_ClearDropsSeries` | ✓ |
+| `internal/metrics` | `TestLeaseRemaining_DecaysAtScrapeTime` | ✓ |
+| `internal/metrics` | `TestRegistryHasAllMetrics` | ✓ |
+| `internal/metrics` | `TestServe_BindFailureReturnsError` | ✓ |
+| `internal/metrics` | `TestServe_ServesMetrics` | ✓ |
 | `internal/nat` | `TestAddressFamily` | ✓ |
 | `internal/nat` | `TestFamilyString` | ✓ |
 | `internal/nat` | `TestIfaceBytes/empty` | ✓ |

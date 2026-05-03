@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/AlexCherrypi/anchord/internal/config"
+	"github.com/AlexCherrypi/anchord/internal/metrics"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -55,6 +56,11 @@ type Manager struct {
 
 	// now provides the wall clock; tests can override.
 	now func() time.Time
+
+	// OnRouteInstalled, if set, is invoked after every successful
+	// route install. Used by main to flip the readiness Tracker once
+	// at least one default route is in place (SPEC F-35).
+	OnRouteInstalled func()
 
 	mu      sync.Mutex
 	current map[int]net.IP // family (unix.AF_INET / AF_INET6) -> last-installed gateway
@@ -126,6 +132,11 @@ func (m *Manager) Run(ctx context.Context) error {
 func (m *Manager) reconcile(ctx context.Context) {
 	addrs, err := m.resolver.LookupIP(ctx, m.cfg.GatewayHostname)
 	if err != nil {
+		// One lookup failure increments error for both families —
+		// the resolver couldn't tell us anything, including whether
+		// either family is reachable. That's the honest signal.
+		metrics.GatewayResolve.WithLabelValues("v4", "error").Inc()
+		metrics.GatewayResolve.WithLabelValues("v6", "error").Inc()
 		slog.Warn("gateway DNS lookup failed",
 			"host", m.cfg.GatewayHostname, "err", err)
 		return
@@ -147,10 +158,16 @@ func (m *Manager) reconcile(ctx context.Context) {
 	}
 
 	if v4 != nil {
+		metrics.GatewayResolve.WithLabelValues("v4", "ok").Inc()
 		m.applyRoute(unix.AF_INET, v4)
+	} else {
+		metrics.GatewayResolve.WithLabelValues("v4", "error").Inc()
 	}
 	if v6 != nil {
+		metrics.GatewayResolve.WithLabelValues("v6", "ok").Inc()
 		m.applyRoute(unix.AF_INET6, v6)
+	} else {
+		metrics.GatewayResolve.WithLabelValues("v6", "error").Inc()
 	}
 }
 
@@ -169,8 +186,13 @@ func (m *Manager) applyRoute(family int, gw net.IP) {
 		return
 	}
 	m.current[family] = gw
+	metrics.GatewayRouteReplaces.WithLabelValues(familyName(family)).Inc()
+	metrics.DefaultRoutePresent.WithLabelValues(familyName(family)).Set(1)
 	slog.Info("default route updated",
 		"family", familyName(family), "gateway", gw)
+	if m.OnRouteInstalled != nil {
+		m.OnRouteInstalled()
+	}
 }
 
 // cleanup removes default routes the manager installed, on shutdown.
@@ -185,6 +207,7 @@ func (m *Manager) cleanup() {
 				"family", familyName(family), "gw", gw, "err", err)
 			continue
 		}
+		metrics.DefaultRoutePresent.WithLabelValues(familyName(family)).Set(0)
 		slog.Info("default route removed",
 			"family", familyName(family), "gateway", gw)
 	}
