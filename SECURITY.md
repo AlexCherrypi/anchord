@@ -13,10 +13,6 @@ problems. Instead, use GitHub's private vulnerability reporting:
 
 → https://github.com/AlexCherrypi/anchord/security/advisories/new
 
-Or email the maintainer directly:
-
-→ alexander.kirsch@wemotion.io
-
 Please include:
 
 - A description of the issue and its impact.
