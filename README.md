@@ -168,16 +168,17 @@ invariants the code relies on — read [ARCHITECTURE.md](ARCHITECTURE.md).
 The sketch below is the one-screen version.
 
 ```mermaid
-%% Three roles in vertical layers:
-%%   LAN  →  network-anchor (anchord)  →  transit-bridge
-%%        →  service-anchors (+ app containers via netns share)
-%%        →  backend-bridge  →  DBs
-%%
-%% Edge styles:
-%%   solid arrow  =  "traffic flows here"
-%%   thick arrow  =  membership in a Docker bridge
-%%   dashed arrow =  netns share via `network_mode: service:<anchor>`
 flowchart TD
+    %% Three roles in vertical layers:
+    %%   LAN  ->  network-anchor (anchord)  ->  transit-bridge
+    %%        ->  service-anchors (+ app containers via netns share)
+    %%        ->  backend-bridge  ->  DBs
+    %%
+    %% Edge styles:
+    %%   solid arrow  =  traffic flow
+    %%   thick arrow  =  membership in a Docker bridge
+    %%   dashed arrow =  netns share via network_mode:service:<anchor>
+
     %% External entry: VLAN sub-interface on the host. The whole
     %% project gets ONE IP via DHCP on this VLAN.
     LAN[/"External LAN<br/>VLAN eth0.42"/]
@@ -197,7 +198,7 @@ flowchart TD
     Smtp["<b>smtp-anchor</b><br/>service-anchor mode<br/>(namespace owner)"]
     Imap["<b>imap-anchor</b><br/>service-anchor mode<br/>(namespace owner)"]
 
-    %% Application containers — share the SA's netns,
+    %% Application containers - share the SA's netns,
     %% no own IP, no own MAC. Just processes in a borrowed namespace.
     Postfix(("postfix"))
     Dovecot(("dovecot"))
@@ -205,7 +206,7 @@ flowchart TD
     %% Backend bridge: shared L2 for SAs to reach DBs.
     %% Backend services never see the transit network.
     Backend[("<b>backend-bridge</b><br/>Docker bridge, internal: true")]
-    DBs[/"mysql, redis, …"/]
+    DBs[/"mysql, redis, ..."/]
 
     LAN -->|"macvlan + DHCP<br/>one IP per project"| Anchord
     Anchord ==> Transit
