@@ -311,8 +311,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-02T19:42:25Z
-- **Code hash:** `sha256:36ed106cfd42bfc9f7d51a3b1ae4cda04fde67de84c692fc4716f9b2ea9730fe`
+- **Last verified:** 2026-05-03T01:50:12Z
+- **Code hash:** `sha256:00b4e666100b74c2b122db5751d4962b0ca8d7dc4ab38350beda3655ab8c84ae`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -359,12 +359,12 @@ release-readiness signal.
 | `internal/conntrack` | `TestFlushDestination_NonzeroExitIsSilent` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_V4Command` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_V6Command` | ✓ |
+| `internal/dhcp` | `TestExtractV6Addrs_NoIANAYieldsNil` | ✓ |
+| `internal/dhcp` | `TestRenewalInterval_FallsBackToHalfLease` | ✓ |
+| `internal/dhcp` | `TestRenewalInterval_UsesT1` | ✓ |
 | `internal/dhcp` | `TestSleepBackoff_CapsAtMax` | ✓ |
 | `internal/dhcp` | `TestSleepBackoff_DoublesBelowCap` | ✓ |
 | `internal/dhcp` | `TestSleepBackoff_RespectsContextCancel` | ✓ |
-| `internal/dhcp` | `TestWriteDhclientConf_Cleanup` | ✓ |
-| `internal/dhcp` | `TestWriteDhclientConf_V4` | ✓ |
-| `internal/dhcp` | `TestWriteDhclientConf_V6` | ✓ |
 | `internal/discovery` | `TestBackendEqual/V6_mode_differs` | ✓ |
 | `internal/discovery` | `TestBackendEqual/different_IPv4` | ✓ |
 | `internal/discovery` | `TestBackendEqual/different_IPv6` | ✓ |
