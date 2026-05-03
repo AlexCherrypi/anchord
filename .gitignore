@@ -16,3 +16,6 @@ go.work.sum
 # Local overrides
 .env
 docker-compose.override.yaml
+
+# Local scratch — agent-generated screenshots, ad-hoc test artifacts
+.tmp/
