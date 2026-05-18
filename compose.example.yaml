@@ -82,7 +82,12 @@ services:
       transit: {}
     environment:
       ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
-      ANCHORD_EXT_IFACE: eth0           # the in-container iface name on the dmz network
+      # Recommended on every multi-network stack: anchord asks the
+      # Docker API which local iface attaches to dmz_macvlan and
+      # matches it by MAC. ANCHORD_EXT_IFACE (default eth0) is a
+      # coin flip across recreates here because Docker's eth0/eth1
+      # assignment is non-deterministic on 2+ networks.
+      ANCHORD_EXT_NETWORK: dmz_macvlan
       ANCHORD_ADDRESS_MODE: dhcp-refresh   # bootstrap | dhcp-refresh | slaac-ra-only
       ANCHORD_DHCP_HOSTNAME: mailcow       # appears in DHCP/DNS
       ANCHORD_LOG_LEVEL: info

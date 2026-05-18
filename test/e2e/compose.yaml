@@ -82,12 +82,7 @@ services:
     restart: "no"
 
   anchord:
-    # anchord:test = anchord:dev + the resolve-vlan.sh shim baked in.
-    # Built by run.sh before compose up. v2: shim sets ANCHORD_EXT_IFACE
-    # to whichever in-container iface lives on the vlan subnet (Docker's
-    # eth0/eth1 ordering across the two attached networks is
-    # nondeterministic between runs).
-    image: anchord:test
+    image: anchord:dev
     cap_add: [NET_ADMIN]
     # Anchord routes packets between vlan ↔ transit, so forwarding
     # sysctls must be enabled in its netns. v2 dropped the v1-era
@@ -106,8 +101,12 @@ services:
       # Must match the compose project name so the discovery filter
       # (com.docker.compose.project=...) hits our own containers.
       ANCHORD_PROJECT: anchord-e2e-${SCENARIO}
-      # The shim rewrites this to whichever iface owns the VLAN subnet.
-      ANCHORD_EXT_IFACE: __resolved_by_shim__
+      # F-37: resolve the external iface by network name via the
+      # Docker API. The vlan network's full Docker name is
+      # "<project>_vlan" (compose's default prefixing). This makes the
+      # iface selection robust against Docker's non-deterministic
+      # eth0/eth1 assignment on multi-network containers.
+      ANCHORD_EXT_NETWORK: anchord-e2e-${SCENARIO}_vlan
       # `none` scenario runs in bootstrap (no DHCP server present);
       # everything else exercises dhcp-refresh against the dnsmasq box.
       ANCHORD_ADDRESS_MODE: ${ADDRESS_MODE:-dhcp-refresh}

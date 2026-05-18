@@ -46,8 +46,12 @@ to the outside world. Concretely:
 - It **joins an existing Docker macvlan network** (declared
   `external: true` in compose) — Docker owns the host-side VLAN
   plumbing and assigns the container its MAC and a bootstrap IPv4.
-  Inside the container, the iface is just `eth0` (configurable via
-  `ANCHORD_EXT_IFACE`).
+  Inside the container, the iface name (`eth0` vs `eth1`) depends on
+  Docker's non-deterministic per-recreate ordering; for any stack with
+  2+ networks, set `ANCHORD_EXT_NETWORK=<docker-net-name>` and anchord
+  resolves the iface via the Docker API by MAC match (SPEC-v2-DRAFT
+  F-37). `ANCHORD_EXT_IFACE` is the simpler fallback for
+  single-network stacks.
 - It optionally **refreshes that address via DHCP** when
   `ANCHORD_ADDRESS_MODE=dhcp-refresh` — sends `DISCOVER` with a
   hostname-derived client-id, replaces the bootstrap address with the

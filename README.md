@@ -142,6 +142,7 @@ services:
       transit: {}
     environment:
       ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
+      ANCHORD_EXT_NETWORK: dmz_macvlan      # resolve iface via Docker API (MAC match)
       ANCHORD_ADDRESS_MODE: dhcp-refresh    # or bootstrap, slaac-ra-only
       ANCHORD_DHCP_HOSTNAME: mailcow
       DOCKER_HOST: tcp://docker-proxy:2375
@@ -296,7 +297,8 @@ All via environment variables.
 |------------------------------|----------|--------------------|-------|
 | `ANCHORD_PROJECT`            | yes      | `$COMPOSE_PROJECT_NAME` | Scope of containers anchord manages |
 | `ANCHORD_ADDRESS_MODE`       | no       | `bootstrap`        | `bootstrap` (keep Docker-assigned IP), `dhcp-refresh` (DHCP-replace it), or `slaac-ra-only` (Docker-assigned v4, kernel SLAAC for v6) |
-| `ANCHORD_EXT_IFACE`          | no       | `eth0`             | In-container name of the macvlan interface Docker plumbed in. Override when the macvlan is not on the container's first iface |
+| `ANCHORD_EXT_NETWORK`        | no       |                    | Docker network name of the external macvlan (e.g. `dmz_macvlan`). When set, anchord resolves its iface via the Docker API by MAC match. **Strongly recommended for any stack with 2+ networks** — `ANCHORD_EXT_IFACE=eth0` is a coin flip across recreates because Docker's eth0/eth1 assignment is non-deterministic |
+| `ANCHORD_EXT_IFACE`          | no       | `eth0`             | In-container name of the macvlan interface. Used only when `ANCHORD_EXT_NETWORK` is unset; if both are set, `ANCHORD_EXT_NETWORK` wins and a WARN is logged |
 | `ANCHORD_DHCP_HOSTNAME`      | no       | = project name     | Announced to the DHCP server in `dhcp-refresh`; also the basis of the DHCP client-id, so reservations are sticky across MAC changes |
 | `ANCHORD_POLL_INTERVAL`      | no       | `30s`              | Safety-net reconcile cadence |
 | `ANCHORD_DHCP_BACKOFF_MAX`   | no       | `5m`               | Max backoff between DHCP-client retries on protocol errors (only meaningful in `dhcp-refresh`) |

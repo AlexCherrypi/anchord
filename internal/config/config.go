@@ -55,9 +55,20 @@ type NetworkAnchor struct {
 	// ExtIfaceName is the in-container name of the macvlan interface
 	// Docker plumbed in via the external macvlan network. Default
 	// "eth0" — the first network Docker attaches when no priorities
-	// are set. Override with ANCHORD_EXT_IFACE for stacks where the
-	// macvlan is on a non-default interface.
+	// are set. Used only when ExtNetwork is empty. Unreliable on
+	// stacks with 2+ networks because Docker's eth0/eth1 assignment
+	// is not deterministic across recreates; see SPEC-v2-DRAFT F-37
+	// and prefer ExtNetwork in that case.
 	ExtIfaceName string
+
+	// ExtNetwork is the Docker network name of the external macvlan
+	// (matches the `name:` field on the network in compose, e.g.
+	// "dmz_macvlan"). When set, anchord queries the Docker API for
+	// its own NetworkSettings.Networks[ExtNetwork].MacAddress and
+	// resolves the in-container iface by MAC match — independent of
+	// whether Docker happened to call it eth0 or eth1 this restart.
+	// Takes precedence over ExtIfaceName. See SPEC-v2-DRAFT F-37.
+	ExtNetwork string
 
 	// AddressMode picks how the external IPv4 is obtained (bootstrap
 	// vs dhcp-refresh vs slaac-ra-only). Default "bootstrap".
@@ -111,6 +122,7 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 	c := &NetworkAnchor{
 		ComposeProject: os.Getenv("ANCHORD_PROJECT"),
 		ExtIfaceName:   getenvDefault("ANCHORD_EXT_IFACE", "eth0"),
+		ExtNetwork:     os.Getenv("ANCHORD_EXT_NETWORK"),
 		DHCPHostname:   os.Getenv("ANCHORD_DHCP_HOSTNAME"),
 		DockerHost:     getenvDefault("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		LogLevel:       getenvDefault("ANCHORD_LOG_LEVEL", "info"),

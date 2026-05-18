@@ -30,6 +30,7 @@ import (
 	"github.com/AlexCherrypi/anchord/internal/config"
 	"github.com/AlexCherrypi/anchord/internal/dhcp"
 	"github.com/AlexCherrypi/anchord/internal/discovery"
+	"github.com/AlexCherrypi/anchord/internal/extiface"
 	"github.com/AlexCherrypi/anchord/internal/health"
 	"github.com/AlexCherrypi/anchord/internal/metrics"
 	"github.com/AlexCherrypi/anchord/internal/nat"
@@ -127,14 +128,55 @@ func runNetworkAnchor(ctx context.Context) error {
 		"/readyz":  health.NetworkAnchorReadinessHandler(tracker),
 	})
 
+	cancelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 1. Docker client — needed before NAT/DHCP because the external
+	//    iface name may come from a Docker-API lookup (F-37).
+	cli, err := client.NewClientWithOpts(
+		client.WithHost(cfg.DockerHost),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer cli.Close()
+
+	// 2. Resolve the external interface.
+	//    If ANCHORD_EXT_NETWORK is set, ask the Docker API which local
+	//    iface attaches to that network and match by MAC — Docker's
+	//    eth0/eth1 assignment is not deterministic across recreates on
+	//    multi-network stacks, so name-based selection is a coin flip
+	//    (SPEC-v2-DRAFT F-37). Otherwise fall back to ANCHORD_EXT_IFACE
+	//    (default eth0) as set by config.LoadNetworkAnchor.
+	if cfg.ExtNetwork != "" {
+		if cfg.ExtIfaceName != "eth0" && os.Getenv("ANCHORD_EXT_IFACE") != "" {
+			slog.Warn("both ANCHORD_EXT_NETWORK and ANCHORD_EXT_IFACE set; using EXT_NETWORK",
+				"network", cfg.ExtNetwork, "ignored_iface", cfg.ExtIfaceName)
+		}
+		selfHost, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("hostname: %w", err)
+		}
+		resolver := extiface.New(cli, selfHost)
+		iface, err := resolver.Resolve(cancelCtx, cfg.ExtNetwork)
+		if err != nil {
+			return fmt.Errorf("resolve external iface from network %q: %w", cfg.ExtNetwork, err)
+		}
+		slog.Info("external interface resolved by network",
+			"network", cfg.ExtNetwork, "iface", iface)
+		cfg.ExtIfaceName = iface
+	}
+
 	slog.Info("anchord starting (network-anchor mode)",
 		"project", cfg.ComposeProject,
 		"ext_iface", cfg.ExtIfaceName,
+		"ext_network", cfg.ExtNetwork,
 		"address_mode", cfg.AddressMode,
 		"hostname", cfg.DHCPHostname,
 		"fp", cfg.Fingerprint())
 
-	// 1. NAT subsystem — install tables/chains immediately so we can
+	// 3. NAT subsystem — install tables/chains immediately so we can
 	//    accept reconciles before the supervisor has settled on an
 	//    address. The DNAT rule is interface-bound (iif/oif match), so
 	//    it works on the Docker-bootstrap IP, on a leased IP, and
@@ -150,7 +192,7 @@ func runNetworkAnchor(ctx context.Context) error {
 		}
 	}()
 
-	// 2. DHCP supervisor — mode-aware:
+	// 4. DHCP supervisor — mode-aware:
 	//      bootstrap / slaac-ra-only: passive, only the IP watcher runs
 	//      dhcp-refresh: v4 DORA on the iface, v6 SOLICIT best-effort
 	//    Docker owns the macvlan child itself; anchord never adds or
@@ -159,8 +201,6 @@ func runNetworkAnchor(ctx context.Context) error {
 	dhcpSup := dhcp.New(cfg.AddressMode, cfg.ExtIfaceName, cfg.DHCPHostname, cfg.DHCPBackoffMax)
 	var wg sync.WaitGroup
 	wg.Add(1)
-	cancelCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	go func() {
 		defer wg.Done()
 		if err := dhcpSup.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
@@ -176,17 +216,7 @@ func runNetworkAnchor(ctx context.Context) error {
 		}
 	}()
 
-	// 3. Docker client.
-	cli, err := client.NewClientWithOpts(
-		client.WithHost(cfg.DockerHost),
-		client.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		return fmt.Errorf("docker client: %w", err)
-	}
-	defer cli.Close()
-
-	// 4. Discovery — finds the shared transit network by inspecting our
+	// 5. Discovery — finds the shared transit network by inspecting our
 	//    own container and emits state snapshots.
 	sharedNet, err := detectSharedNetwork(cancelCtx, cli)
 	if err != nil {
@@ -202,7 +232,7 @@ func runNetworkAnchor(ctx context.Context) error {
 		}
 	}()
 
-	// 5. Reconciler — the main loop.
+	// 6. Reconciler — the main loop.
 	rec := reconciler.New(natMgr)
 	rec.OnReconciled = tracker.MarkReconciled
 	return rec.Run(cancelCtx, disc.Updates())

@@ -13,10 +13,10 @@ import (
 func clearAnchordEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"ANCHORD_PROJECT", "ANCHORD_EXT_IFACE", "ANCHORD_ADDRESS_MODE",
-		"ANCHORD_DHCP_HOSTNAME", "ANCHORD_POLL_INTERVAL",
-		"ANCHORD_DHCP_BACKOFF_MAX", "ANCHORD_LOG_LEVEL",
-		"COMPOSE_PROJECT_NAME", "DOCKER_HOST",
+		"ANCHORD_PROJECT", "ANCHORD_EXT_IFACE", "ANCHORD_EXT_NETWORK",
+		"ANCHORD_ADDRESS_MODE", "ANCHORD_DHCP_HOSTNAME",
+		"ANCHORD_POLL_INTERVAL", "ANCHORD_DHCP_BACKOFF_MAX",
+		"ANCHORD_LOG_LEVEL", "COMPOSE_PROJECT_NAME", "DOCKER_HOST",
 	} {
 		t.Setenv(k, "")
 	}
@@ -117,6 +117,31 @@ func TestLoad_ExtIfaceOverride(t *testing.T) {
 	}
 	if cfg.ExtIfaceName != "eth1" {
 		t.Errorf("ExtIfaceName override: got %q want eth1", cfg.ExtIfaceName)
+	}
+}
+
+func TestLoad_ExtNetworkOptional(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ExtNetwork != "" {
+		t.Errorf("ExtNetwork should default to empty (fallback path), got %q", cfg.ExtNetwork)
+	}
+}
+
+func TestLoad_ExtNetworkSet(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	t.Setenv("ANCHORD_EXT_NETWORK", "dmz_macvlan")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ExtNetwork != "dmz_macvlan" {
+		t.Errorf("ExtNetwork: got %q want dmz_macvlan", cfg.ExtNetwork)
 	}
 }
 

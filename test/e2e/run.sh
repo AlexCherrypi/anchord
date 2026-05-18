@@ -121,20 +121,29 @@ run_scenario() {
         return 1
     fi
 
-    # 2. Resolve which in-container iface joined the vlan bridge — the
-    #    shim already picked one and exported ANCHORD_EXT_IFACE; we
-    #    re-detect here using the same heuristic so script assertions
-    #    don't have to parse anchord's logs.
+    # 2. F-37: anchord resolved its external iface from
+    #    ANCHORD_EXT_NETWORK via the Docker API. We re-detect by subnet
+    #    membership inside the container so script assertions don't
+    #    have to parse anchord's logs, and so we can verify anchord
+    #    picked the same iface we'd expect.
     local ext_iface
     ext_iface=$(docker exec "${project}-anchord-1" sh -c \
         'ip -4 -o addr show | awk -v s="10.99.0." '"'"'$4 ~ ("^" s) {print $2; exit}'"'"' ; \
          ip -6 -o addr show | awk -v s="fd99:"   '"'"'$4 ~ ("^" s) {print $2; exit}'"'"'' 2>/dev/null \
          | head -n1)
     if [ -n "$ext_iface" ]; then
-        check "external iface detected (resolved to $ext_iface)" 1
+        check "external iface attached on vlan subnet (resolved to $ext_iface)" 1
     else
-        check "external iface detected (no vlan-subnet addr)" 0
+        check "external iface attached on vlan subnet" 0
         ext_iface=eth0
+    fi
+
+    # F-37: anchord's log must mention the network-based resolution.
+    if docker logs "${project}-anchord-1" 2>&1 \
+        | grep -q "external interface resolved by network"; then
+        check "anchord log confirms F-37 network-based iface resolution" 1
+    else
+        check "anchord log confirms F-37 network-based iface resolution" 0
     fi
 
     # 3. nftables tables installed (both families).
@@ -537,12 +546,6 @@ teardown() {
 
 step "building anchord:dev"
 docker build -q -t anchord:dev "$repo_root" >/dev/null
-
-step "building anchord:test (anchord:dev + resolve-vlan shim)"
-docker build -q -t anchord:test \
-    --build-arg ANCHORD_BASE=anchord:dev \
-    -f "$e2e_dir/images/anchord-test/Dockerfile" \
-    "$e2e_dir" >/dev/null
 
 cat >&2 <<'BANNER'
 
