@@ -288,6 +288,10 @@ services:
     image: ghcr.io/alexcherrypi/anchord:latest
     cap_add: [NET_ADMIN]
     mac_address: "02:4c:4b:50:0a:01"
+    sysctls:
+      net.ipv4.ip_forward: "1"            # routes between dmz and transit
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.accept_ra: "2"    # keep SLAAC alive with forwarding on
     networks:
       dmz:
         ipv4_address: 192.168.150.100   # bootstrap IP

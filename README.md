@@ -130,6 +130,13 @@ services:
     image: ghcr.io/alexcherrypi/anchord:latest
     cap_add: [NET_ADMIN]
     mac_address: "02:4c:4b:50:0a:01"   # stable across recreates
+    # anchord routes between dmz (macvlan) and transit (bridge), so
+    # the kernel needs forwarding on. accept_ra=2 keeps SLAAC working
+    # even when forwarding is enabled.
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.accept_ra: "2"
     networks:
       dmz: { ipv4_address: 192.168.150.100 }   # bootstrap IP
       transit: {}

@@ -61,6 +61,16 @@ services:
     cap_add:
       - NET_ADMIN
     mac_address: "02:4c:4b:50:0a:01"   # stable across recreates → stable DHCP
+    # anchord still routes packets between the dmz macvlan and the
+    # project-internal transit bridge, so forwarding sysctls must be
+    # set in its netns. v2 no longer needs the v1 ARP gymnastics
+    # (arp_ignore/arp_announce); Docker handles MAC plumbing.
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      # accept_ra=2 keeps kernel SLAAC working when forwarding is on.
+      net.ipv6.conf.all.accept_ra: "2"
+      net.ipv6.conf.default.accept_ra: "2"
     networks:
       dmz:
         # Compose-assigned bootstrap IPs. anchord uses them immediately

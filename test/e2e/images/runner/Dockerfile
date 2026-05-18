@@ -8,10 +8,16 @@ FROM alpine:3.21
 
 RUN apk add --no-cache \
         docker-cli \
+        docker-cli-buildx \
         docker-cli-compose \
         bash \
         jq \
         ca-certificates
+
+# Force BuildKit so `--platform=$BUILDPLATFORM` in the anchord:dev
+# Dockerfile resolves correctly. The legacy builder leaves it as an
+# empty string and `docker build` errors out before the FROM line.
+ENV DOCKER_BUILDKIT=1
 
 WORKDIR /repo
 

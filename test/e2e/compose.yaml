@@ -89,6 +89,19 @@ services:
     # nondeterministic between runs).
     image: anchord:test
     cap_add: [NET_ADMIN]
+    # Anchord routes packets between vlan ↔ transit, so forwarding
+    # sysctls must be enabled in its netns. v2 dropped the v1-era
+    # macvlan-on-parent ARP sysctls (arp_ignore/announce) — those were
+    # tied to the now-gone in-container macvlan child — but the
+    # forwarding bits are still essential.
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      # accept_ra=2 lets the kernel still autoconfigure v6 from RAs
+      # even when forwarding is enabled; without this, a forwarding
+      # host ignores RAs entirely.
+      net.ipv6.conf.all.accept_ra: "2"
+      net.ipv6.conf.default.accept_ra: "2"
     environment:
       # Must match the compose project name so the discovery filter
       # (com.docker.compose.project=...) hits our own containers.

@@ -47,10 +47,10 @@ anchord still removes its nftables tables on SIGTERM/SIGINT and (in dhcp-refresh
 
 ### F-23 (revised) — Runtime capabilities
 
-The network-anchor still needs `CAP_NET_ADMIN` (for nftables and, in dhcp-refresh mode, netlink address replacement on the iface). It no longer needs:
+The network-anchor still needs `CAP_NET_ADMIN` (for nftables and, in dhcp-refresh mode, netlink address replacement on the iface) and a small set of forwarding sysctls (`net.ipv4.ip_forward`, `net.ipv6.conf.all.forwarding`, `net.ipv6.conf.all.accept_ra=2`) because it still routes packets between the macvlan and the project-internal transit bridge. It no longer needs:
 
 - `network_mode: host`
-- sysctls in the container netns
+- the v1-era ARP-tuning sysctls (`arp_ignore`/`arp_announce`) that worked around macvlan-on-parent ARP collisions
 - a separate host-side VLAN-sub-interface argument (`ANCHORD_VLAN_PARENT` removed)
 
 It is now a regular Docker container on the macvlan network.
@@ -116,8 +116,9 @@ S-2, S-3, S-6, S-7, S-8 are unchanged in form and outcome.
 1. Create the shared macvlan network once per host (or via a tiny network-only compose project).
 2. In each project:
    - Bump the anchord image to v2.
-   - Replace `networks: [transit]` (with sysctls and `ANCHORD_VLAN_PARENT`) on the network-anchor with `networks: { dmz: { ipv4_address: ... }, transit: {} }`.
-   - Drop `sysctls:` and `ANCHORD_VLAN_PARENT`/`ANCHORD_EXT_MAC` env vars.
+   - Replace `networks: [transit]` on the network-anchor with `networks: { dmz: { ipv4_address: ... }, transit: {} }`.
+   - Trim the sysctls block: keep `net.ipv4.ip_forward=1`, `net.ipv6.conf.all.forwarding=1`, `net.ipv6.conf.all.accept_ra=2`; drop the v1 ARP gymnastics (`arp_ignore`/`arp_announce`).
+   - Drop `ANCHORD_VLAN_PARENT`/`ANCHORD_EXT_MAC` env vars.
    - Add `mac_address:` if you want a stable MAC (most do).
    - Pick an `ANCHORD_ADDRESS_MODE` (start with `bootstrap`).
 3. Backend containers and `anchord.expose` labels are unchanged.
