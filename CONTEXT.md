@@ -146,11 +146,11 @@ same image."
 
 The mode is selected by `ANCHORD_MODE`, defaulting to `network-anchor`.
 The `command: [service-anchor]` form is a convenience equivalent. We
-deliberately do **not** auto-detect the mode (e.g., from the presence
-or absence of `ANCHORD_VLAN_PARENT`): silent fall-through to
-service-anchor mode when an operator forgets to set the VLAN parent
-would mask a misconfiguration as a working-but-pointless container.
-Explicit mode selection produces loud, correct failures.
+deliberately do **not** auto-detect the mode (e.g., from whether the
+container is joined to a macvlan network or only to a bridge): silent
+fall-through to service-anchor mode when an operator forgot to wire
+up the macvlan would mask a misconfiguration as a working-but-pointless
+container. Explicit mode selection produces loud, correct failures.
 
 ## When to break these rules
 

@@ -27,16 +27,16 @@ func TestIfaceBytes(t *testing.T) {
 			t.Errorf("got % x, want % x", got, want)
 		}
 	})
-	t.Run("typical anchord-ext", func(t *testing.T) {
-		got := ifaceBytes("anchord-ext")
+	t.Run("typical eth0", func(t *testing.T) {
+		got := ifaceBytes("eth0")
 		if len(got) != 16 {
 			t.Fatalf("want 16 bytes, got %d", len(got))
 		}
-		if !bytes.HasPrefix(got, []byte("anchord-ext")) {
+		if !bytes.HasPrefix(got, []byte("eth0")) {
 			t.Errorf("prefix mismatch: got % x", got)
 		}
-		// Trailing five bytes must all be NUL.
-		for i := len("anchord-ext"); i < 16; i++ {
+		// Trailing twelve bytes must all be NUL.
+		for i := len("eth0"); i < 16; i++ {
 			if got[i] != 0 {
 				t.Errorf("byte %d should be NUL, got %x", i, got[i])
 			}

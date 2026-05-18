@@ -1,19 +1,21 @@
 package dhcp
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
 
+	"github.com/AlexCherrypi/anchord/internal/config"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
 
 // Tests in this file deliberately avoid the netlink-bound surface
-// (ensureLink, removeLink, watchIP, watchLinkUsable, the DHCP client
-// I/O) — those are exercised end-to-end by test/e2e, which runs
-// against a real container with NET_ADMIN. Here we cover the pure
-// helpers that don't need a netlink socket.
+// (applyV4Lease, applyV6Addrs, watchIP, the DHCP client I/O) — those
+// are exercised end-to-end by test/e2e, which runs against a real
+// container with NET_ADMIN. Here we cover the pure helpers that don't
+// need a netlink socket plus the mode-dispatch logic of Run().
 
 func TestRenewalInterval_UsesT1(t *testing.T) {
 	ack, err := dhcpv4.New(dhcpv4.WithLeaseTime(3600), dhcpv4.WithGeneric(dhcpv4.OptionRenewTimeValue, encodeUint32(900)))
@@ -105,10 +107,78 @@ func TestSleepBackoff_RespectsContextCancel(t *testing.T) {
 	}
 }
 
+// TestRun_PassiveModes guards the v2 contract: in bootstrap and
+// slaac-ra-only the supervisor must NOT touch netlink — Docker owns
+// the link. The test cancels the context immediately; if the
+// supervisor tried to open an nclient4/nclient6 socket on a missing
+// iface it would block on retries or panic. A clean ctx.Err() return
+// proves Run() short-circuited without I/O.
+func TestRun_PassiveModes(t *testing.T) {
+	for _, mode := range []config.AddressMode{
+		config.AddressModeBootstrap,
+		config.AddressModeSLAACRAOnly,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			s := New(mode, "no-such-iface", "host", time.Second)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+
+			start := time.Now()
+			err := s.Run(ctx)
+			elapsed := time.Since(start)
+
+			if err != context.DeadlineExceeded {
+				t.Fatalf("got err=%v, want context.DeadlineExceeded", err)
+			}
+			// Passive modes return immediately on ctx done — give
+			// generous slack for CI variance but reject "spent the
+			// whole timeout retrying DHCP" behaviour.
+			if elapsed > 500*time.Millisecond {
+				t.Errorf("passive mode blocked for %s, expected near-deadline", elapsed)
+			}
+		})
+	}
+}
+
+// TestRun_UnknownMode is a defence-in-depth check: even though config
+// rejects unknown modes at load time, Run() should not silently
+// accept a corrupt Supervisor.
+func TestRun_UnknownMode(t *testing.T) {
+	s := New(config.AddressMode("garbage"), "eth0", "host", time.Second)
+	err := s.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unknown mode")
+	}
+}
+
+func TestClientID_PrefixesType(t *testing.T) {
+	// RFC 2132 §9.14: first byte is the type tag, 0x00 = "other".
+	got := clientID("mailcow")
+	want := append([]byte{0x00}, []byte("mailcow")...)
+	if !bytes.Equal(got, want) {
+		t.Errorf("got % x want % x", got, want)
+	}
+}
+
+func TestClientID_StableAcrossCalls(t *testing.T) {
+	// Same hostname must yield the same client-id; that's the whole
+	// point — DHCP servers need to recognise the same client across
+	// container recreates regardless of MAC.
+	a := clientID("mailcow")
+	b := clientID("mailcow")
+	if !bytes.Equal(a, b) {
+		t.Errorf("not stable: %v vs %v", a, b)
+	}
+	c := clientID("nextcloud")
+	if bytes.Equal(a, c) {
+		t.Errorf("distinct hostnames collided: %v", a)
+	}
+}
+
 // encodeUint32 is the wire encoding of a 32-bit DHCP option value:
 // 4 bytes big-endian. Used by the renewal-time test to construct an
 // explicit T1 option.
 func encodeUint32(v uint32) []byte {
 	return []byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
 }
-

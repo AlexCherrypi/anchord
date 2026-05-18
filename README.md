@@ -8,15 +8,23 @@
 
 > One IP per Compose project. No subnet bookkeeping. Real client source IPs.
 
+> **Status (2026-05-18):** v2 has landed on `main`. The network-anchor now
+> joins an existing Docker macvlan network (`external: true`) instead of
+> creating one itself; it can refresh its assigned IPv4 via DHCP at runtime
+> (`ANCHORD_ADDRESS_MODE=dhcp-refresh`) or just keep the Docker-assigned
+> bootstrap IP. See [SPEC-v2-DRAFT.md](SPEC-v2-DRAFT.md) for the deltas.
+
 **Built for self-hosted, homelab, and small-fleet workloads** that want
 classical "one server, one service" semantics — Mailcow, Nextcloud,
 Matrix/Synapse, Gitea, anything that historically ran on its own box.
 
-`anchord` is a per-project network anchor for Docker Compose. It gives a Compose
-project a single externally-routable IP (via macvlan + DHCP, with hostname
-announcement) and dynamically maintains nftables DNAT rules pointing at
-labelled service-anchor containers — without you ever hard-coding an IP
-inside the project.
+`anchord` is a per-project network anchor for Docker Compose. It gives a
+Compose project a single externally-routable IP — by joining a shared
+Docker macvlan network, optionally refreshing the address via DHCP with a
+stable hostname — and dynamically maintains nftables DNAT rules pointing
+at labelled service-anchor containers, without you ever hard-coding an IP
+inside the project. Fully dual-stack: IPv4 and IPv6 are independent and
+both surface through the same DNAT/MASQUERADE plane.
 
 It exists because we wanted "one server, one service-pack" semantics back —
 the way it used to be when Mailcow lived on its own physical box, Nextcloud
@@ -97,33 +105,39 @@ hostname routing, or HTTP-aware load balancing, run a reverse proxy
 
 ## How it looks
 
+The shared macvlan network is created once per host (out-of-band, or via
+a tiny network-only compose project):
+
+```sh
+docker network create -d macvlan \
+    -o parent=eth0.42 \
+    --subnet=192.168.150.0/24 --gateway=192.168.150.1 \
+    dmz_macvlan
+```
+
+Each consumer project then references it as `external: true`:
+
 ```yaml
 networks:
-  transit:  { driver: bridge, internal: true }
-  backend:  { driver: bridge, internal: true }
+  dmz:
+    external: true
+    name: dmz_macvlan
+  transit: { driver: bridge, internal: true }
+  backend: { driver: bridge, internal: true }
 
 services:
   anchord:
     image: ghcr.io/alexcherrypi/anchord:latest
     cap_add: [NET_ADMIN]
-    sysctls:
-      # Required: anchord forwards between macvlan and transit.
-      net.ipv4.ip_forward: "1"
-      net.ipv6.conf.all.forwarding: "1"
-      # accept_ra=2 lets the kernel still take SLAAC from upstream RAs
-      # while forwarding is enabled.
-      net.ipv6.conf.all.accept_ra: "2"
-      # arp_ignore=1 / arp_announce=2 keep anchord-ext's IP from being
-      # ARP-claimed by the macvlan parent — without these, inbound TCP
-      # can land on the parent interface and miss the DNAT rule.
-      net.ipv4.conf.all.arp_ignore: "1"
-      net.ipv4.conf.all.arp_announce: "2"
+    mac_address: "02:4c:4b:50:0a:01"   # stable across recreates
+    networks:
+      dmz: { ipv4_address: 192.168.150.100 }   # bootstrap IP
+      transit: {}
     environment:
       ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
-      ANCHORD_VLAN_PARENT: eth0.42
+      ANCHORD_ADDRESS_MODE: dhcp-refresh    # or bootstrap, slaac-ra-only
       ANCHORD_DHCP_HOSTNAME: mailcow
       DOCKER_HOST: tcp://docker-proxy:2375
-    networks: [transit]
 
   smtp-anchor:
     image: ghcr.io/alexcherrypi/anchord:latest
@@ -139,19 +153,24 @@ services:
     network_mode: "service:smtp-anchor"
 ```
 
-That's it. No IPs, no subnets, no port-mappings on the host. anchord watches
-the docker socket, finds containers in the same compose project that carry the
-`anchord.expose` label, and wires up nftables DNAT entries pointing at their
-current bridge-network IPs. When containers restart and get new IPs, the maps
-update atomically and stale conntrack entries are flushed.
+The full example with backend services lives in
+[compose.example.yaml](compose.example.yaml).
+
+That's it. anchord doesn't plumb the macvlan itself — Docker handles
+that and hands anchord a regular interface. anchord watches the docker
+socket, finds containers in the same compose project that carry the
+`anchord.expose` label, and wires up nftables DNAT entries pointing at
+their current bridge-network IPs. When containers restart and get new
+IPs, the maps update atomically and stale conntrack entries are flushed.
 
 ### One image, two modes
 
 The `anchord` image plays two roles in a project:
 
 - **Network-anchor** (`ANCHORD_MODE=network-anchor`, the default). One per
-  project. Owns the macvlan child, runs the DHCP client, and maintains the
-  nftables NAT state.
+  project. Joins the shared Docker macvlan network, optionally refreshes
+  its IP via DHCP (`ANCHORD_ADDRESS_MODE=dhcp-refresh`), and maintains
+  the nftables NAT state.
 - **Service-anchor** (`ANCHORD_MODE=service-anchor`). One per exposed service.
   Resolves the network-anchor via Docker DNS, installs and maintains a default
   route via it, and serves as the namespace owner that real application
@@ -187,7 +206,8 @@ flowchart TD
     %%   [ ... ]   = container (anchord + service-anchors)
     %%   ( ... )   = process   (app containers — share netns, no own IP)
     LAN[/External LAN - VLAN eth0.42/]
-    Anchord[anchord network-anchor mode<br>macvlan + nftables<br>DNAT-by-map + masquerade]
+    DmzMv{{dmz_macvlan<br>Docker macvlan, external: true}}
+    Anchord[anchord network-anchor mode<br>nftables DNAT-by-map<br>+ masquerade + optional DHCP refresh]
     Transit{{transit-bridge<br>Docker bridge, internal: true}}
     Smtp[smtp-anchor<br>service-anchor mode<br>namespace owner]
     Imap[imap-anchor<br>service-anchor mode<br>namespace owner]
@@ -196,7 +216,8 @@ flowchart TD
     Backend{{backend-bridge<br>Docker bridge, internal: true}}
     DBs[/mysql, redis, .../]
 
-    LAN -->|macvlan + DHCP - one IP per project| Anchord
+    LAN ==> DmzMv
+    DmzMv ==>|one IP per project, bootstrap or DHCP-refresh| Anchord
     Anchord ==> Transit
     Transit ==> Smtp
     Transit ==> Imap
@@ -209,9 +230,13 @@ flowchart TD
 
 Three layers, by design:
 
-1. **External** — macvlan child interface in the anchord container. DHCP
-   client runs here. MAC is deterministic from the project name (so DHCP
-   reservations are stable across container recreations).
+1. **External** — a Docker macvlan network (`external: true`) shared by
+   every project that wants a LAN-visible IP. Docker plumbs the
+   host-side VLAN sub-interface and assigns each anchord container its
+   MAC and bootstrap IPv4 (declare `mac_address:` in compose for
+   stability; the DHCP client-id is derived from
+   `ANCHORD_DHCP_HOSTNAME` and is independent of the MAC, so
+   reservations stick across recreates).
 2. **Transit** — internal Docker bridge connecting anchord to the
    service-anchors. `internal: true` ensures no Docker-managed MASQUERADE
    meddles with our paths.
@@ -221,10 +246,11 @@ Three layers, by design:
 ### Why DNAT-by-map?
 
 nftables named maps let us express the entire DNAT table as a single rule
-that consults a key/value lookup:
+that consults a key/value lookup (the iface name is whatever Docker gave
+us — `eth0` by default, override via `ANCHORD_EXT_IFACE`):
 
 ```
-iifname "anchord-ext" meta l4proto tcp dnat to tcp dport map @dnat_tcp
+iifname "eth0" meta l4proto tcp dnat to tcp dport map @dnat_tcp
 ```
 
 When a container restarts and its IP changes, we replace the map's contents
@@ -262,13 +288,17 @@ All via environment variables.
 | Variable                     | Required | Default            | Notes |
 |------------------------------|----------|--------------------|-------|
 | `ANCHORD_PROJECT`            | yes      | `$COMPOSE_PROJECT_NAME` | Scope of containers anchord manages |
-| `ANCHORD_VLAN_PARENT`        | yes      |                    | Host VLAN sub-interface, e.g. `eth0.42` |
-| `ANCHORD_DHCP_HOSTNAME`      | no       | = project name     | Announced to DHCP server |
-| `ANCHORD_EXT_MAC`            | no       | sha256(project)[:4] prefixed `02:42:` | Override only if you must |
-| `ANCHORD_EXT_IFACE`          | no       | `anchord-ext`      | macvlan child interface name |
+| `ANCHORD_ADDRESS_MODE`       | no       | `bootstrap`        | `bootstrap` (keep Docker-assigned IP), `dhcp-refresh` (DHCP-replace it), or `slaac-ra-only` (Docker-assigned v4, kernel SLAAC for v6) |
+| `ANCHORD_EXT_IFACE`          | no       | `eth0`             | In-container name of the macvlan interface Docker plumbed in. Override when the macvlan is not on the container's first iface |
+| `ANCHORD_DHCP_HOSTNAME`      | no       | = project name     | Announced to the DHCP server in `dhcp-refresh`; also the basis of the DHCP client-id, so reservations are sticky across MAC changes |
 | `ANCHORD_POLL_INTERVAL`      | no       | `30s`              | Safety-net reconcile cadence |
-| `ANCHORD_DHCP_BACKOFF_MAX`   | no       | `5m`               | Max backoff between DHCP-client retries on protocol errors |
+| `ANCHORD_DHCP_BACKOFF_MAX`   | no       | `5m`               | Max backoff between DHCP-client retries on protocol errors (only meaningful in `dhcp-refresh`) |
 | `DOCKER_HOST`                | no       | unix socket        | Set to `tcp://docker-proxy:2375` for socket-proxy mode |
+
+The MAC is declared by the operator in compose (`mac_address:`),
+not by anchord. If you don't pin one, Docker picks a deterministic
+MAC from the container name; either way the DHCP client-id is what
+keeps reservations stable across recreates.
 
 ### Service-anchor mode
 

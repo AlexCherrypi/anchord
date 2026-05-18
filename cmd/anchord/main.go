@@ -129,14 +129,16 @@ func runNetworkAnchor(ctx context.Context) error {
 
 	slog.Info("anchord starting (network-anchor mode)",
 		"project", cfg.ComposeProject,
-		"vlan_parent", cfg.VLANParent,
 		"ext_iface", cfg.ExtIfaceName,
-		"mac", cfg.MACString(),
+		"address_mode", cfg.AddressMode,
 		"hostname", cfg.DHCPHostname,
 		"fp", cfg.Fingerprint())
 
 	// 1. NAT subsystem — install tables/chains immediately so we can
-	//    accept reconciles before the first DHCP lease arrives.
+	//    accept reconciles before the supervisor has settled on an
+	//    address. The DNAT rule is interface-bound (iif/oif match), so
+	//    it works on the Docker-bootstrap IP, on a leased IP, and
+	//    across any swap between the two.
 	natMgr := nat.New(cfg.ExtIfaceName)
 	if err := natMgr.Setup(); err != nil {
 		return fmt.Errorf("nat setup: %w", err)
@@ -148,17 +150,13 @@ func runNetworkAnchor(ctx context.Context) error {
 		}
 	}()
 
-	// 2. DHCP supervisor — runs in the background, emits IPs as it
-	//    learns them. We don't block on the first IP: maps work without
-	//    knowing our external address (the DNAT rule is interface-bound,
-	//    not IP-bound). Masquerade auto-tracks the assigned address.
-	//
-	//    We track its goroutine via WaitGroup so that the deferred
-	//    Supervisor.removeLink (which deletes the macvlan child) is
-	//    guaranteed to finish before main returns. Without this the
-	//    container can exit before removeLink runs, leaving SPEC F-20
-	//    (clean teardown) unverifiable.
-	dhcpSup := dhcp.New(cfg.VLANParent, cfg.ExtIfaceName, cfg.ExtMAC, cfg.DHCPHostname, cfg.DHCPBackoffMax)
+	// 2. DHCP supervisor — mode-aware:
+	//      bootstrap / slaac-ra-only: passive, only the IP watcher runs
+	//      dhcp-refresh: v4 DORA on the iface, v6 SOLICIT best-effort
+	//    Docker owns the macvlan child itself; anchord never adds or
+	//    deletes a link. We still WaitGroup so deferred cleanup (lease
+	//    RELEASE, address-removal) completes before main returns.
+	dhcpSup := dhcp.New(cfg.AddressMode, cfg.ExtIfaceName, cfg.DHCPHostname, cfg.DHCPBackoffMax)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	cancelCtx, cancel := context.WithCancel(ctx)

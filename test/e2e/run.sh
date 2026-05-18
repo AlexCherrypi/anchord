@@ -83,6 +83,14 @@ run_scenario() {
 
     step "scenario: $scenario (project=$project)"
     export SCENARIO="$scenario"
+    # `none` has no DHCP server: run anchord in bootstrap mode so it
+    # keeps Docker's IPAM-assigned address instead of looping on retry.
+    # The rest exercise dhcp-refresh against dnsmasq.
+    if [ "$scenario" = "none" ]; then
+        export ADDRESS_MODE="bootstrap"
+    else
+        export ADDRESS_MODE="dhcp-refresh"
+    fi
 
     # Bring up. --build forces rebuild if image source changed (compose's
     # default is to skip rebuild when an image with the right tag already
@@ -113,12 +121,20 @@ run_scenario() {
         return 1
     fi
 
-    # 2. macvlan child interface exists.
-    ax "$project" ip link show anchord-ext
-    if [ "$REPLY_RC" -eq 0 ]; then
-        check "anchord-ext interface present" 1
+    # 2. Resolve which in-container iface joined the vlan bridge — the
+    #    shim already picked one and exported ANCHORD_EXT_IFACE; we
+    #    re-detect here using the same heuristic so script assertions
+    #    don't have to parse anchord's logs.
+    local ext_iface
+    ext_iface=$(docker exec "${project}-anchord-1" sh -c \
+        'ip -4 -o addr show | awk -v s="10.99.0." '"'"'$4 ~ ("^" s) {print $2; exit}'"'"' ; \
+         ip -6 -o addr show | awk -v s="fd99:"   '"'"'$4 ~ ("^" s) {print $2; exit}'"'"'' 2>/dev/null \
+         | head -n1)
+    if [ -n "$ext_iface" ]; then
+        check "external iface detected (resolved to $ext_iface)" 1
     else
-        check "anchord-ext interface present" 0 "$REPLY_STDOUT"
+        check "external iface detected (no vlan-subnet addr)" 0
+        ext_iface=eth0
     fi
 
     # 3. nftables tables installed (both families).
@@ -127,10 +143,10 @@ run_scenario() {
     ax "$project" nft list table ip6 anchord_v6
     check "nftables anchord_v6 table installed" "$([ "$REPLY_RC" -eq 0 ] && echo 1 || echo 0)" "$REPLY_STDOUT"
 
-    # 4. Per-scenario address assertions on anchord-ext.
-    ax "$project" ip -4 -o addr show anchord-ext
+    # 4. Per-scenario address assertions on the resolved external iface.
+    ax "$project" ip -4 -o addr show "$ext_iface"
     local v4_out=$REPLY_STDOUT
-    ax "$project" ip -6 -o addr show anchord-ext
+    ax "$project" ip -6 -o addr show "$ext_iface"
     local v6_out=$REPLY_STDOUT
 
     local has_v4=0 has_v6=0
@@ -139,24 +155,26 @@ run_scenario() {
 
     case "$scenario" in
         v4-only)
-            check "anchord-ext has IPv4 from 10.99.0.0/24" "$has_v4" "$v4_out"
-            check "anchord-ext has no fd99:: address"      "$([ $has_v6 -eq 0 ] && echo 1 || echo 0)" "$v6_out"
+            check "$ext_iface has IPv4 from 10.99.0.0/24" "$has_v4" "$v4_out"
+            # Docker bridge IPAM gives us a v6 bootstrap regardless of
+            # whether the dnsmasq scenario announces v6 — accept either.
             ;;
         v6-only)
-            check "anchord-ext has no IPv4 (10.99.0/24)"     "$([ $has_v4 -eq 0 ] && echo 1 || echo 0)" "$v4_out"
-            check "anchord-ext has IPv6 from fd99::/64 (RA)" "$has_v6" "$v6_out"
+            check "$ext_iface has IPv6 from fd99::/64 (RA or bootstrap)" "$has_v6" "$v6_out"
             ;;
         both)
-            check "anchord-ext has IPv4 from 10.99.0.0/24"   "$has_v4" "$v4_out"
-            check "anchord-ext has IPv6 from fd99::/64 (RA)" "$has_v6" "$v6_out"
+            check "$ext_iface has IPv4 from 10.99.0.0/24"            "$has_v4" "$v4_out"
+            check "$ext_iface has IPv6 from fd99::/64 (RA or bootstrap)" "$has_v6" "$v6_out"
             ;;
         dhcpv6-stateful)
-            check "anchord-ext has IPv4 from 10.99.0.0/24"      "$has_v4" "$v4_out"
-            check "anchord-ext has IPv6 from fd99::/64 (DHCPv6)" "$has_v6" "$v6_out"
+            check "$ext_iface has IPv4 from 10.99.0.0/24"             "$has_v4" "$v4_out"
+            check "$ext_iface has IPv6 from fd99::/64 (DHCPv6 or bootstrap)" "$has_v6" "$v6_out"
             ;;
         none)
-            check "anchord-ext has no IPv4 lease (expected)" "$([ $has_v4 -eq 0 ] && echo 1 || echo 0)" "$v4_out"
-            check "anchord-ext has no IPv6 (expected)"       "$([ $has_v6 -eq 0 ] && echo 1 || echo 0)" "$v6_out"
+            # v2 bootstrap mode: anchord keeps the Docker-assigned IP
+            # from the vlan bridge's IPAM (no DHCP server present).
+            check "$ext_iface keeps Docker-bootstrapped IPv4" "$has_v4" "$v4_out"
+            check "$ext_iface keeps Docker-bootstrapped IPv6" "$has_v6" "$v6_out"
             ;;
     esac
 
@@ -183,23 +201,23 @@ run_scenario() {
     # full LAN-client → DNAT → service-anchor namespace path. Skipped when
     # no lease was obtained (e.g. scenario=none, or the documented Docker
     # Desktop macvlan-on-bridge limitation).
-    local target_v4=$(extract_anchord_ext_v4 "$v4_out")
-    local target_v6=$(extract_anchord_ext_v6 "$v6_out")
+    local target_v4=$(extract_ext_iface_v4 "$v4_out")
+    local target_v6=$(extract_ext_iface_v6 "$v6_out")
     phase2_inbound "$project" "$target_v4" "$target_v6"
 
     # ---- Phase 2: graceful teardown (S-6) --------------------------------
     phase2_teardown "$project"
 }
 
-# extract_anchord_ext_v4 reads the IPv4 (without /CIDR) from a single line
-# of `ip -4 -o addr show anchord-ext`, or empty if none.
-extract_anchord_ext_v4() {
+# extract_ext_iface_v4 reads the IPv4 (without /CIDR) from a single line
+# of `ip -4 -o addr show <ext-iface>`, or empty if none.
+extract_ext_iface_v4() {
     awk '$3=="inet" {print $4}' <<<"$1" | head -n1 | cut -d/ -f1
 }
 
-# extract_anchord_ext_v6 reads the first global IPv6 (skipping link-local
-# fe80::) from `ip -6 -o addr show anchord-ext`.
-extract_anchord_ext_v6() {
+# extract_ext_iface_v6 reads the first global IPv6 (skipping link-local
+# fe80::) from `ip -6 -o addr show <ext-iface>`.
+extract_ext_iface_v6() {
     awk '$3=="inet6" && $4 !~ /^fe80/ {print $4}' <<<"$1" | head -n1 | cut -d/ -f1
 }
 
@@ -426,21 +444,21 @@ phase2_s3() {
 
 # phase2_teardown — SPEC scenario S-6: stop anchord cleanly, capture
 # its exit code and final logs, then bring the stack down. Verifies
-# that anchord exits 0 and that its shutdown path logged the macvlan
-# removal (which is the observable side-effect of nat.Teardown +
-# dhcp.removeLink running on SIGTERM).
+# that anchord exits 0 on SIGTERM and that nat.Teardown raised no
+# warnings.
 #
-# Note: SPEC S-6 also requires a DHCPRELEASE on shutdown. anchord's
-# pure-Go DHCP client now sends one in its deferred cleanup before the
-# IP is removed from the iface. We don't actively tcpdump for it here
-# (would inflate harness complexity for low payoff), but the v4
-# release is no longer a known gap.
+# v2: anchord no longer owns the macvlan child (Docker does), so we no
+# longer assert a "macvlan removed" log line. The observable shutdown
+# side effects are now: signal-received log, clean exit code, no
+# nat-teardown warnings, and (in dhcp-refresh) DHCPRELEASE flushed.
+# We don't tcpdump for the RELEASE here — it'd inflate the harness for
+# low payoff — but its absence isn't a known gap.
 phase2_teardown() {
     local project=$1
     local anchord="${project}-anchord-1"
 
-    # Graceful stop with a generous timeout so the deferred Teardown +
-    # removeLink log lines actually flush.
+    # Graceful stop with a generous timeout so the deferred Teardown
+    # log line actually flushes.
     if ! docker stop -t 10 "$anchord" >/dev/null 2>&1; then
         check "S-6 docker stop anchord (SIGTERM)" 0
         teardown "$project"
@@ -462,11 +480,6 @@ phase2_teardown() {
     else
         check "S-6 logs show graceful shutdown" 0
     fi
-    if printf '%s' "$logs" | grep -q '"macvlan removed'; then
-        check "S-6 logs show macvlan removed" 1
-    else
-        check "S-6 logs show macvlan removed" 0
-    fi
     if printf '%s' "$logs" | grep -qi '"nat teardown'; then
         # nat.Teardown is logged ONLY on failure (slog.Warn), so seeing
         # the line means teardown raised. Absence == clean.
@@ -481,21 +494,20 @@ phase2_teardown() {
 
 # apply_bridge_flood_fix is the Docker Desktop dev convenience.
 #
-# Empirically the v4-DHCPDISCOVER-blackholing on Docker Desktop is NOT
-# a "macvlan rx_handler vs. bridge rx_handler" kernel quirk as one
-# might first assume — it is `bridge-nf-call-iptables=1` (the WSL2 VM
-# default) routing every Layer-2 bridge frame through the iptables
-# FORWARD chain, where Docker's auto-generated DOCKER-FORWARD rules
-# drop inter-bridge broadcasts. Confirmed by tcpdump: frames egress
-# anchord-ext cleanly, the bridge sees them, but the FORWARD chain
-# drops them before they reach peer veth ports. Setting
-# bridge-nf-call-iptables=0 makes them flow.
+# Empirically the v4-DHCPDISCOVER-blackholing on Docker Desktop is
+# `bridge-nf-call-iptables=1` (the WSL2 VM default) routing every
+# Layer-2 bridge frame through the iptables FORWARD chain, where
+# Docker's auto-generated DOCKER-FORWARD rules drop inter-bridge
+# broadcasts. Confirmed by tcpdump: frames egress anchord's vlan iface
+# cleanly, the bridge sees them, but the FORWARD chain drops them
+# before they reach peer veth ports. Setting bridge-nf-call-iptables=0
+# makes them flow.
 #
 # WARNING: This is dev-only. Setting bridge-nf-call-iptables=0 on a
 # production host weakens Docker's inter-container filtering. Don't
 # do this anywhere that isn't a throwaway dev VM. Production anchord
-# deployments don't need any of this — there `lowerdev` is a physical
-# VLAN sub-interface, frames don't traverse a Linux bridge at all.
+# deployments don't need any of this — the macvlan network's parent is
+# a real VLAN sub-interface and frames don't traverse a Linux bridge.
 apply_bridge_flood_fix() {
     # Host-wide; bridge-name not needed. We still keep the project arg
     # for a future per-bridge variant and for log clarity.
@@ -535,28 +547,30 @@ docker build -q -t anchord:test \
 cat >&2 <<'BANNER'
 
 NOTE: When running inside Docker (especially Docker Desktop on Windows
-or macOS), L2 broadcasts from a macvlan child onto a Docker bridge are
-NOT forwarded reliably to peer veth endpoints. anchord's DHCPDISCOVER
-will leave anchord-ext but never reach the dnsmasq container's eth0,
-so the "anchord-ext has IPv4 from 10.99.0.0/24" assertion fails here.
+or macOS), L2 broadcasts on Docker bridges are NOT forwarded reliably
+to peer veth endpoints. anchord's DHCPDISCOVER will leave its vlan
+iface but never reach the dnsmasq container's eth0, so the "$ext_iface
+has IPv4 from 10.99.0.0/24" assertion can fail in dhcp-refresh
+scenarios under Docker Desktop. The bootstrap-mode scenario (`none`)
+is unaffected — it only relies on Docker's own IPAM.
 
 The Phase-2 inbound dataplane assertions (S-2, S-3) ride the same path
-in reverse: probe -> bridge -> anchord-ext is also subject to the
+in reverse: probe -> bridge -> anchord is also subject to the
 broadcast/learning quirk. They are skipped automatically when no v4/v6
-lease was obtained, so on Docker Desktop you'll see them run only when
-SLAAC succeeded (v6-only / both scenarios).
+address was visible, so on Docker Desktop you'll see them run only
+when SLAAC or bootstrap IPAM succeeded.
 
-On a real Linux host with a physical VLAN parent (eth0.42 etc.) this
-path works as intended. Treat the v4-lease FAIL as an environment
-limitation, not an anchord bug — every other assertion verifies the
-code path that anchord actually owns.
+On a real Linux host (v2: with a real Docker macvlan network on a
+physical VLAN parent) this path works as intended. Treat the v4-lease
+FAIL as an environment limitation, not an anchord bug — every other
+assertion verifies the code path that anchord actually owns.
 
 Set E2E_BRIDGE_FLOOD_FIX=1 to apply a privileged bridge-flood
 workaround to the docker network's vlan bridge after compose up. This
 forces broadcast flooding to all bridge member ports, which bypasses
-the macvlan-on-bridge quirk and lets v4 DHCP complete locally too.
+the Docker-Desktop bridge quirk and lets v4 DHCP complete locally too.
 The workaround is dev-convenience only — it is NOT applied in any
-production setup, where the physical VLAN parent makes it unnecessary.
+production setup, where the macvlan parent makes it unnecessary.
 BANNER
 
 declare -A summary_pass

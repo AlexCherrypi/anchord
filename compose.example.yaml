@@ -1,22 +1,50 @@
-# Example: a Mailcow-style compose project using anchord for a single
-# external IP via DHCP, with two service-anchors (smtp + imap).
+# Example: a Mailcow-style compose project using anchord-v2 to get a
+# single external IP via DHCP, with two service-anchors (smtp + imap).
+#
+# v2 split: the macvlan network is created out-of-band (or by a small
+# network-only compose project) and shared via `external: true`.
+# anchord no longer plumbs the macvlan child itself.
 #
 # What you get:
-#   - One IP on the VLAN (DHCP-assigned, hostname-announced)
+#   - One IP on the VLAN (DHCP-refreshed, hostname-announced)
 #   - SMTP ports (25/465/587) DNAT'd to the postfix container
 #   - IMAP ports (143/993) DNAT'd to the dovecot container
 #   - Real client source IPs preserved (no MASQUERADE on inbound)
 #   - Internal DNS-based service discovery (mysql, redis are unreachable
 #     from outside, only via the backend network)
 #
-# Adjust ANCHORD_VLAN_PARENT to your host's VLAN sub-interface.
+# Prerequisite — the shared macvlan network (one-time, per host):
+#
+#   docker network create -d macvlan \
+#       -o parent=eth0.42 \
+#       --subnet=192.168.150.0/24 \
+#       --gateway=192.168.150.1 \
+#       dmz_macvlan
+#
+# Dual-stack works the same way — add a v6 subnet and Docker will hand
+# out v6 addresses alongside v4, and anchord's nft tables route both:
+#
+#   docker network create -d macvlan \
+#       -o parent=eth0.42 \
+#       --ipv6 \
+#       --subnet=192.168.150.0/24 --gateway=192.168.150.1 \
+#       --subnet=2001:db8:dmz::/64 --gateway=2001:db8:dmz::1 \
+#       dmz_macvlan
+#
+# Alternatively define it once in a "00-dmz-network" compose project
+# and `external: true` reference it from every consumer stack.
 
 name: mailcow-example
 
 networks:
+  dmz:
+    # Pre-existing macvlan network — Docker plumbs the host-side VLAN
+    # sub-interface and assigns MAC+IP. anchord just attaches.
+    external: true
+    name: dmz_macvlan
   transit:
-    # Anchor-to-anchor + anchord-to-service-anchors.
-    # Internal: no implicit gateway, no Docker-managed NAT.
+    # Anchor-to-service-anchors bridge. internal:true → no implicit
+    # gateway, no Docker-managed NAT (anchord owns MASQUERADE).
     driver: bridge
     internal: true
   backend:
@@ -27,22 +55,28 @@ networks:
 
 services:
 
-  # ---------- the anchor itself ---------------------------------------------
+  # ---------- the network anchor itself ------------------------------------
   anchord:
     image: ghcr.io/alexcherrypi/anchord:latest   # (build locally for now)
     cap_add:
       - NET_ADMIN
-    sysctls:
-      net.ipv4.ip_forward: "1"
-      net.ipv6.conf.all.forwarding: "1"
+    mac_address: "02:4c:4b:50:0a:01"   # stable across recreates → stable DHCP
+    networks:
+      dmz:
+        # Compose-assigned bootstrap IPs. anchord uses them immediately
+        # and (in dhcp-refresh mode) replaces the v4 once a lease arrives;
+        # v6 stays kernel-managed unless the LAN runs a DHCPv6 server,
+        # in which case anchord picks up the lease alongside v4.
+        ipv4_address: 192.168.150.100
+        # ipv6_address: 2001:db8:dmz::100   # uncomment for v6 IPAM
+      transit: {}
     environment:
       ANCHORD_PROJECT: ${COMPOSE_PROJECT_NAME}
-      ANCHORD_VLAN_PARENT: eth0.42        # ← your VLAN sub-interface on the host
-      ANCHORD_DHCP_HOSTNAME: mailcow      # appears in DHCP/DNS
+      ANCHORD_EXT_IFACE: eth0           # the in-container iface name on the dmz network
+      ANCHORD_ADDRESS_MODE: dhcp-refresh   # bootstrap | dhcp-refresh | slaac-ra-only
+      ANCHORD_DHCP_HOSTNAME: mailcow       # appears in DHCP/DNS
       ANCHORD_LOG_LEVEL: info
       DOCKER_HOST: tcp://docker-proxy:2375
-    networks:
-      - transit
     depends_on:
       - docker-proxy
     restart: unless-stopped
@@ -63,8 +97,11 @@ services:
 
   # ---------- service anchor: SMTP -----------------------------------------
   smtp-anchor:
-    image: alpine:3.21
-    command: ["sleep", "infinity"]
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add:
+      - NET_ADMIN
+    environment:
+      ANCHORD_MODE: service-anchor
     networks:
       - transit
       - backend
@@ -82,8 +119,11 @@ services:
 
   # ---------- service anchor: IMAP -----------------------------------------
   imap-anchor:
-    image: alpine:3.21
-    command: ["sleep", "infinity"]
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add:
+      - NET_ADMIN
+    environment:
+      ANCHORD_MODE: service-anchor
     networks:
       - transit
       - backend

@@ -6,19 +6,19 @@
 // as a single rule that consults the map — atomic map updates mean
 // rule changes are seamless and lock-free.
 //
-// Layout (v4 example):
+// Layout (v4 example, with ANCHORD_EXT_IFACE="eth0"):
 //
 //	table ip anchord_v4 {
 //	  map dnat_tcp { type inet_service : ipv4_addr; }
 //	  map dnat_udp { type inet_service : ipv4_addr; }
 //	  chain prerouting {
 //	    type nat hook prerouting priority dstnat;
-//	    iifname "anchord-ext" meta l4proto tcp dnat to tcp dport map @dnat_tcp
-//	    iifname "anchord-ext" meta l4proto udp dnat to udp dport map @dnat_udp
+//	    iifname "eth0" meta l4proto tcp dnat to tcp dport map @dnat_tcp
+//	    iifname "eth0" meta l4proto udp dnat to udp dport map @dnat_udp
 //	  }
 //	  chain postrouting {
 //	    type nat hook postrouting priority srcnat;
-//	    oifname "anchord-ext" masquerade
+//	    oifname "eth0" masquerade
 //	  }
 //	}
 package nat

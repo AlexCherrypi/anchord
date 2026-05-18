@@ -13,8 +13,8 @@ import (
 func clearAnchordEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"ANCHORD_PROJECT", "ANCHORD_VLAN_PARENT", "ANCHORD_EXT_IFACE",
-		"ANCHORD_EXT_MAC", "ANCHORD_DHCP_HOSTNAME", "ANCHORD_POLL_INTERVAL",
+		"ANCHORD_PROJECT", "ANCHORD_EXT_IFACE", "ANCHORD_ADDRESS_MODE",
+		"ANCHORD_DHCP_HOSTNAME", "ANCHORD_POLL_INTERVAL",
 		"ANCHORD_DHCP_BACKOFF_MAX", "ANCHORD_LOG_LEVEL",
 		"COMPOSE_PROJECT_NAME", "DOCKER_HOST",
 	} {
@@ -26,30 +26,6 @@ func clearAnchordEnv(t *testing.T) {
 	_ = os.Unsetenv("ANCHORD_METRICS_ADDR")
 }
 
-func TestDeriveMAC(t *testing.T) {
-	a := deriveMAC("mailcow")
-	b := deriveMAC("mailcow")
-	if a.String() != b.String() {
-		t.Errorf("not deterministic: %s vs %s", a, b)
-	}
-	c := deriveMAC("nextcloud")
-	if a.String() == c.String() {
-		t.Errorf("collision between distinct projects: %s", a)
-	}
-	if a[0] != 0x02 || a[1] != 0x42 {
-		t.Errorf("expected 02:42 OUI prefix, got %s", a)
-	}
-	// First octet semantics:
-	//   bit 0 (LSB) = 0 → unicast
-	//   bit 1       = 1 → locally administered
-	if a[0]&0x01 != 0 {
-		t.Errorf("first octet must be unicast (LSB clear): %s", a)
-	}
-	if a[0]&0x02 == 0 {
-		t.Errorf("first octet must be locally administered (bit 1 set): %s", a)
-	}
-}
-
 func TestLoad_RequiresProject(t *testing.T) {
 	clearAnchordEnv(t)
 	_, err := LoadNetworkAnchor()
@@ -58,19 +34,9 @@ func TestLoad_RequiresProject(t *testing.T) {
 	}
 }
 
-func TestLoad_RequiresVLANParent(t *testing.T) {
-	clearAnchordEnv(t)
-	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	_, err := LoadNetworkAnchor()
-	if err == nil || !strings.Contains(err.Error(), "ANCHORD_VLAN_PARENT") {
-		t.Fatalf("expected error mentioning ANCHORD_VLAN_PARENT, got: %v", err)
-	}
-}
-
 func TestLoad_ComposeProjectFallback(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("COMPOSE_PROJECT_NAME", "from-compose")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -84,7 +50,6 @@ func TestLoad_ProjectOverridesCompose(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("ANCHORD_PROJECT", "explicit")
 	t.Setenv("COMPOSE_PROJECT_NAME", "from-compose")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -94,16 +59,33 @@ func TestLoad_ProjectOverridesCompose(t *testing.T) {
 	}
 }
 
-func TestLoad_DefaultsAndDerivations(t *testing.T) {
+// TestLoad_NoVLANParentRequired guards the v2 contract: anchord no
+// longer owns macvlan creation, so the old required ANCHORD_VLAN_PARENT
+// must not gate startup.
+func TestLoad_NoVLANParentRequired(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	cfg, err := LoadNetworkAnchor()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.ExtIfaceName != "anchord-ext" {
+	if cfg.ExtIfaceName != "eth0" {
+		t.Errorf("ExtIfaceName default in v2 should be eth0, got %q", cfg.ExtIfaceName)
+	}
+}
+
+func TestLoad_DefaultsAndDerivations(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ExtIfaceName != "eth0" {
 		t.Errorf("ExtIfaceName default: %q", cfg.ExtIfaceName)
+	}
+	if cfg.AddressMode != AddressModeBootstrap {
+		t.Errorf("AddressMode default should be bootstrap, got %q", cfg.AddressMode)
 	}
 	if cfg.DHCPHostname != "mailcow" {
 		t.Errorf("DHCPHostname should default to project name, got %q", cfg.DHCPHostname)
@@ -123,16 +105,59 @@ func TestLoad_DefaultsAndDerivations(t *testing.T) {
 	if cfg.MetricsAddr != "127.0.0.1:9090" {
 		t.Errorf("MetricsAddr default: %q", cfg.MetricsAddr)
 	}
-	want := deriveMAC("mailcow").String()
-	if cfg.ExtMAC.String() != want {
-		t.Errorf("ExtMAC should be derived from project name: got %s want %s", cfg.ExtMAC, want)
+}
+
+func TestLoad_ExtIfaceOverride(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	t.Setenv("ANCHORD_EXT_IFACE", "eth1")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ExtIfaceName != "eth1" {
+		t.Errorf("ExtIfaceName override: got %q want eth1", cfg.ExtIfaceName)
+	}
+}
+
+func TestLoad_AddressModeOverride(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want AddressMode
+	}{
+		{"bootstrap", AddressModeBootstrap},
+		{"dhcp-refresh", AddressModeDHCPRefresh},
+		{"slaac-ra-only", AddressModeSLAACRAOnly},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearAnchordEnv(t)
+			t.Setenv("ANCHORD_PROJECT", "mailcow")
+			t.Setenv("ANCHORD_ADDRESS_MODE", tc.raw)
+			cfg, err := LoadNetworkAnchor()
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if cfg.AddressMode != tc.want {
+				t.Errorf("got %q want %q", cfg.AddressMode, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_AddressModeInvalid(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	t.Setenv("ANCHORD_ADDRESS_MODE", "gibberish")
+	_, err := LoadNetworkAnchor()
+	if err == nil || !strings.Contains(err.Error(), "ANCHORD_ADDRESS_MODE") {
+		t.Fatalf("expected error mentioning ANCHORD_ADDRESS_MODE, got: %v", err)
 	}
 }
 
 func TestLoad_HostnameOverride(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	t.Setenv("ANCHORD_DHCP_HOSTNAME", "mail.example.com")
 	cfg, err := LoadNetworkAnchor()
 	if err != nil {
@@ -143,35 +168,9 @@ func TestLoad_HostnameOverride(t *testing.T) {
 	}
 }
 
-func TestLoad_MACOverride(t *testing.T) {
-	clearAnchordEnv(t)
-	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
-	t.Setenv("ANCHORD_EXT_MAC", "aa:bb:cc:dd:ee:ff")
-	cfg, err := LoadNetworkAnchor()
-	if err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if cfg.ExtMAC.String() != "aa:bb:cc:dd:ee:ff" {
-		t.Errorf("got %s", cfg.ExtMAC)
-	}
-}
-
-func TestLoad_MACInvalid(t *testing.T) {
-	clearAnchordEnv(t)
-	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
-	t.Setenv("ANCHORD_EXT_MAC", "not-a-mac")
-	_, err := LoadNetworkAnchor()
-	if err == nil || !strings.Contains(err.Error(), "ANCHORD_EXT_MAC") {
-		t.Errorf("expected error mentioning ANCHORD_EXT_MAC, got: %v", err)
-	}
-}
-
 func TestLoad_PollIntervalOverride(t *testing.T) {
 	clearAnchordEnv(t)
 	t.Setenv("ANCHORD_PROJECT", "mailcow")
-	t.Setenv("ANCHORD_VLAN_PARENT", "eth0.42")
 	t.Setenv("ANCHORD_POLL_INTERVAL", "5s")
 	cfg, err := LoadNetworkAnchor()
 	if err != nil {
@@ -294,17 +293,43 @@ func TestMetricsAddrFromEnv(t *testing.T) {
 }
 
 func TestFingerprintDeterministic(t *testing.T) {
-	c1 := &NetworkAnchor{ComposeProject: "mailcow", VLANParent: "eth0.42"}
-	c2 := &NetworkAnchor{ComposeProject: "mailcow", VLANParent: "eth0.42"}
-	c3 := &NetworkAnchor{ComposeProject: "mailcow", VLANParent: "eth0.99"}
-	c4 := &NetworkAnchor{ComposeProject: "nextcloud", VLANParent: "eth0.42"}
+	c1 := &NetworkAnchor{ComposeProject: "mailcow", ExtIfaceName: "eth0"}
+	c2 := &NetworkAnchor{ComposeProject: "mailcow", ExtIfaceName: "eth0"}
+	c3 := &NetworkAnchor{ComposeProject: "mailcow", ExtIfaceName: "eth1"}
+	c4 := &NetworkAnchor{ComposeProject: "nextcloud", ExtIfaceName: "eth0"}
 	if c1.Fingerprint() != c2.Fingerprint() {
 		t.Errorf("fingerprint not deterministic")
 	}
 	if c1.Fingerprint() == c3.Fingerprint() {
-		t.Errorf("fingerprint should change with VLAN parent")
+		t.Errorf("fingerprint should change with ext iface")
 	}
 	if c1.Fingerprint() == c4.Fingerprint() {
 		t.Errorf("fingerprint should change with project name")
+	}
+}
+
+func TestParseAddressMode(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    AddressMode
+		wantErr bool
+	}{
+		{"", AddressModeBootstrap, false},
+		{"bootstrap", AddressModeBootstrap, false},
+		{"dhcp-refresh", AddressModeDHCPRefresh, false},
+		{"slaac-ra-only", AddressModeSLAACRAOnly, false},
+		{"BOOTSTRAP", "", true}, // case-sensitive — keep the env contract tight
+		{"static", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, err := parseAddressMode(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Errorf("got %q want %q", got, tc.want)
+			}
+		})
 	}
 }

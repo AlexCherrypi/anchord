@@ -14,10 +14,36 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"os"
 	"strconv"
 	"time"
+)
+
+// AddressMode controls how the network-anchor obtains its external
+// IPv4 address on the macvlan that Docker plumbed in for it.
+// See SPEC.md §2.1 (v2).
+type AddressMode string
+
+const (
+	// AddressModeBootstrap keeps the Compose-assigned IPv4 (and any
+	// kernel-acquired SLAAC v6) for the lifetime of the container.
+	// No DHCP client runs. The least-surprising default.
+	AddressModeBootstrap AddressMode = "bootstrap"
+
+	// AddressModeDHCPRefresh starts on the Compose-assigned IPv4 so
+	// the container is reachable immediately, then sends a DHCP
+	// DISCOVER with a client-id derived from ANCHORD_DHCP_HOSTNAME.
+	// On lease success the leased address replaces the bootstrap one
+	// atomically. Useful when reservations live in OPNsense DHCP
+	// rather than in compose files.
+	AddressModeDHCPRefresh AddressMode = "dhcp-refresh"
+
+	// AddressModeSLAACRAOnly keeps the Compose-assigned IPv4 and
+	// relies on the kernel's RA/SLAAC for the v6 side. No DHCP client
+	// runs in either family. Equivalent to bootstrap from anchord's
+	// perspective; named distinctly so operators reading compose can
+	// see at a glance that v6 is RA-driven on this stack.
+	AddressModeSLAACRAOnly AddressMode = "slaac-ra-only"
 )
 
 // NetworkAnchor holds resolved settings for the network-anchor mode.
@@ -26,20 +52,20 @@ type NetworkAnchor struct {
 	// Required. Usually injected as ${COMPOSE_PROJECT_NAME}.
 	ComposeProject string
 
-	// VLANParent is the host-side parent interface for the macvlan
-	// (e.g. "eth0.42" or "br-vlan42"). Must already be up.
-	VLANParent string
-
-	// ExtIfaceName is the name of the macvlan child created inside
-	// the anchord container (default "anchord-ext").
+	// ExtIfaceName is the in-container name of the macvlan interface
+	// Docker plumbed in via the external macvlan network. Default
+	// "eth0" — the first network Docker attaches when no priorities
+	// are set. Override with ANCHORD_EXT_IFACE for stacks where the
+	// macvlan is on a non-default interface.
 	ExtIfaceName string
 
-	// ExtMAC is the stable MAC address used for DHCP reservations.
-	// If empty, derived deterministically from ComposeProject.
-	ExtMAC net.HardwareAddr
+	// AddressMode picks how the external IPv4 is obtained (bootstrap
+	// vs dhcp-refresh vs slaac-ra-only). Default "bootstrap".
+	AddressMode AddressMode
 
-	// DHCPHostname is the hostname announced to the DHCP server.
-	// Defaults to ComposeProject.
+	// DHCPHostname is the hostname (and the basis of the client-id)
+	// announced to the DHCP server in dhcp-refresh mode. Defaults to
+	// ComposeProject.
 	DHCPHostname string
 
 	// PollInterval is the safety-net reconcile cadence on top of
@@ -47,7 +73,7 @@ type NetworkAnchor struct {
 	PollInterval time.Duration
 
 	// DHCPBackoffMax caps the exponential backoff between DHCP
-	// attempts. The user has been clear: not five months.
+	// attempts (only meaningful in dhcp-refresh mode).
 	DHCPBackoffMax time.Duration
 
 	// DockerHost is the docker API endpoint. Default unix socket.
@@ -58,7 +84,7 @@ type NetworkAnchor struct {
 
 	// MetricsAddr is the listen address for the Prometheus metrics
 	// endpoint. Default ":9090". Empty disables the listener.
-	// (Same listener will host /healthz and /readyz when those land.)
+	// (Same listener hosts /healthz and /readyz.)
 	MetricsAddr string
 }
 
@@ -84,8 +110,7 @@ type ServiceAnchor struct {
 func LoadNetworkAnchor() (*NetworkAnchor, error) {
 	c := &NetworkAnchor{
 		ComposeProject: os.Getenv("ANCHORD_PROJECT"),
-		VLANParent:     os.Getenv("ANCHORD_VLAN_PARENT"),
-		ExtIfaceName:   getenvDefault("ANCHORD_EXT_IFACE", "anchord-ext"),
+		ExtIfaceName:   getenvDefault("ANCHORD_EXT_IFACE", "eth0"),
 		DHCPHostname:   os.Getenv("ANCHORD_DHCP_HOSTNAME"),
 		DockerHost:     getenvDefault("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		LogLevel:       getenvDefault("ANCHORD_LOG_LEVEL", "info"),
@@ -99,25 +124,16 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 	if c.ComposeProject == "" {
 		return nil, fmt.Errorf("ANCHORD_PROJECT (or COMPOSE_PROJECT_NAME) must be set")
 	}
-	if c.VLANParent == "" {
-		return nil, fmt.Errorf("ANCHORD_VLAN_PARENT must be set (e.g. eth0.42)")
-	}
 	if c.DHCPHostname == "" {
 		c.DHCPHostname = c.ComposeProject
 	}
 
-	// MAC: explicit, or deterministic-from-project.
-	if mac := os.Getenv("ANCHORD_EXT_MAC"); mac != "" {
-		hw, err := net.ParseMAC(mac)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ANCHORD_EXT_MAC: %w", err)
-		}
-		c.ExtMAC = hw
-	} else {
-		c.ExtMAC = deriveMAC(c.ComposeProject)
+	mode, err := parseAddressMode(os.Getenv("ANCHORD_ADDRESS_MODE"))
+	if err != nil {
+		return nil, err
 	}
+	c.AddressMode = mode
 
-	var err error
 	c.PollInterval, err = parseDuration("ANCHORD_POLL_INTERVAL", 30*time.Second)
 	if err != nil {
 		return nil, err
@@ -148,17 +164,19 @@ func LoadServiceAnchor() (*ServiceAnchor, error) {
 	return c, nil
 }
 
-// deriveMAC produces a stable locally-administered unicast MAC from a
-// project name. Locally administered = bit 1 of first octet set, unicast
-// = bit 0 cleared. We use the OUI 02:42:xx, which Docker also uses for
-// its bridge MACs — keeps things visually consistent in `arp -a`.
-func deriveMAC(project string) net.HardwareAddr {
-	sum := sha256.Sum256([]byte("anchord:" + project))
-	mac := make(net.HardwareAddr, 6)
-	mac[0] = 0x02
-	mac[1] = 0x42
-	copy(mac[2:], sum[:4])
-	return mac
+// parseAddressMode maps the raw env value to an AddressMode. Empty
+// string yields the default (bootstrap); unknown values are rejected
+// loudly rather than silently falling through.
+func parseAddressMode(raw string) (AddressMode, error) {
+	switch AddressMode(raw) {
+	case "":
+		return AddressModeBootstrap, nil
+	case AddressModeBootstrap, AddressModeDHCPRefresh, AddressModeSLAACRAOnly:
+		return AddressMode(raw), nil
+	default:
+		return "", fmt.Errorf("invalid ANCHORD_ADDRESS_MODE %q (want %q, %q, or %q)",
+			raw, AddressModeBootstrap, AddressModeDHCPRefresh, AddressModeSLAACRAOnly)
+	}
 }
 
 func getenvDefault(key, def string) string {
@@ -174,11 +192,11 @@ func getenvDefault(key, def string) string {
 // "explicit empty" requires LookupEnv rather than getenvDefault.
 //
 // Default is loopback-only (not :9090) to keep the metrics surface
-// off the macvlan parent — binding 0.0.0.0 would publish metrics on
-// the LAN-facing anchord-ext. Operators who want project-internal
-// scraping set ":9090" explicitly. In service-anchor mode, app
-// containers share the netns via `network_mode: service:`, so
-// 127.0.0.1:9090 IS reachable from those containers.
+// off the macvlan interface — binding 0.0.0.0 would publish metrics on
+// the LAN-facing network. Operators who want project-internal scraping
+// set ":9090" explicitly. In service-anchor mode, app containers share
+// the netns via `network_mode: service:`, so 127.0.0.1:9090 IS
+// reachable from those containers.
 func metricsAddrFromEnv() string {
 	v, ok := os.LookupEnv("ANCHORD_METRICS_ADDR")
 	if !ok {
@@ -203,13 +221,8 @@ func parseDuration(key string, def time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
-// MACString returns the configured MAC in standard colon-hex form.
-func (c *NetworkAnchor) MACString() string {
-	return c.ExtMAC.String()
-}
-
 // Fingerprint returns a short identifier suitable for log lines.
 func (c *NetworkAnchor) Fingerprint() string {
-	h := sha256.Sum256([]byte(c.ComposeProject + c.VLANParent))
+	h := sha256.Sum256([]byte(c.ComposeProject + "|" + c.ExtIfaceName))
 	return hex.EncodeToString(h[:4])
 }

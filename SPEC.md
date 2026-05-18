@@ -4,6 +4,15 @@ This document defines **what anchord must do** to be considered complete,
 independent of how it does it. Use it as the acceptance criteria for v1.0
 and as the canonical source of truth when implementation and README drift.
 
+> **Note (2026-05-18):** The v2 pivot from [SPEC-v2-DRAFT.md](SPEC-v2-DRAFT.md)
+> has landed on `main`. Macvlan ownership moved from anchord to Docker;
+> anchord now joins an existing `external: true` macvlan network and runs
+> only the L3/L4 surface. The functional requirements below remain
+> authoritative; the §2.1 deltas (DHCP becomes one of three address modes,
+> macvlan child no longer anchord's concern) are spelled out in the v2
+> draft. References to "owns the macvlan child" in this document should
+> be read as "joins the macvlan network".
+
 ## 1. Mental model (the non-negotiable invariant)
 
 > **One Compose project = one classical server.**
@@ -19,16 +28,29 @@ several containers", that's a bug.
 
 ### 2.1 External addressing
 
-- **F-1** Project obtains exactly one IPv4 from DHCP on the configured VLAN.
-- **F-2** Project obtains zero or one IPv6 (SLAAC or DHCPv6, whichever the
-  network provides). v6-less environments must not block v4 operation.
-- **F-3** The MAC used for DHCP is stable across container recreations,
-  derived deterministically from the project name unless overridden.
+- **F-1** Project obtains exactly one IPv4 on the configured macvlan VLAN.
+  Three sourcing modes selectable via `ANCHORD_ADDRESS_MODE` (see
+  SPEC-v2-DRAFT.md): `bootstrap` (Docker-assigned, default),
+  `dhcp-refresh` (start on bootstrap, replace with DHCP lease), or
+  `slaac-ra-only` (Docker-assigned, kernel-driven v6).
+- **F-2** Project obtains zero or one IPv6 (SLAAC, optional stateful
+  DHCPv6 in dhcp-refresh, or Docker-assigned via macvlan IPAM). v6-less
+  environments must not block v4 operation; v4-less environments must
+  not block v6 operation. v4 and v6 are independent throughout —
+  DNAT/MASQUERADE tables exist for both families unconditionally and
+  every address mode is dual-stack capable.
+- **F-3** External-interface identity is stable across container
+  recreations. The MAC is declared by the operator via `mac_address:`
+  in compose; the DHCP client-id (in dhcp-refresh) is derived from
+  `ANCHORD_DHCP_HOSTNAME`, so reservation stickiness is independent of
+  the MAC.
 - **F-4** The DHCP hostname announced equals the project name unless
   overridden.
 - **F-5** DHCP lease renewals must not interrupt established connections.
 - **F-6** If DHCP fails at startup, anchord retries with exponential backoff
-  capped at a configurable maximum (default 5 minutes).
+  capped at a configurable maximum (default 5 minutes). Only applies in
+  `dhcp-refresh` mode; `bootstrap` and `slaac-ra-only` never fail this
+  way because they do not run a DHCP client.
 
 ### 2.2 Inbound traffic (DNAT)
 
@@ -73,7 +95,9 @@ several containers", that's a bug.
 ### 2.5 Operational
 
 - **F-20** anchord exits cleanly on SIGTERM/SIGINT, removing its nftables
-  tables and macvlan child interface.
+  tables and (in `dhcp-refresh`) sending `DHCPRELEASE` for the active
+  lease. The macvlan interface itself is owned by Docker and is reaped
+  when the container exits — anchord does not add or delete the link.
 - **F-21** All log output is structured JSON to stdout.
 - **F-22** All configuration is via environment variables. No config files.
 - **F-23** The network-anchor runs as a single container, requiring only

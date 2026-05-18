@@ -55,7 +55,7 @@ COPY --from=build /out/anchord /usr/local/bin/anchord
 # the version/created/revision triplet at push time; everything else
 # stays static here so locally-built images carry the same labels.
 LABEL org.opencontainers.image.title="anchord" \
-      org.opencontainers.image.description="Per-project network anchor for Docker Compose: one external IP per project (DHCP+macvlan), real client source IPs, nftables DNAT to labelled service-anchors." \
+      org.opencontainers.image.description="Per-project network anchor for Docker Compose: joins an existing Docker macvlan network, optional DHCP refresh of the assigned IP, nftables DNAT to labelled service-anchors, real client source IPs preserved." \
       org.opencontainers.image.source="https://github.com/AlexCherrypi/anchord" \
       org.opencontainers.image.url="https://github.com/AlexCherrypi/anchord" \
       org.opencontainers.image.documentation="https://github.com/AlexCherrypi/anchord#readme" \
@@ -63,7 +63,8 @@ LABEL org.opencontainers.image.title="anchord" \
       org.opencontainers.image.authors="Alexander Kirsch" \
       org.opencontainers.image.vendor="AlexCherrypi"
 
-# anchord needs CAP_NET_ADMIN for netlink and macvlan operations.
+# anchord needs CAP_NET_ADMIN for nftables and (in dhcp-refresh mode)
+# netlink address replacement on the iface Docker provided.
 # It does NOT need to run as root — set the capabilities at compose
 # level via cap_add.
 USER root
