@@ -162,7 +162,10 @@ services:
 ```
 
 The full example with backend services lives in
-[compose.example.yaml](compose.example.yaml).
+[compose.example.yaml](compose.example.yaml). Wrapping an existing
+Compose project (Mailcow, Nextcloud-AIO, …) without touching its
+compose file: see [compose.example-wrap.yaml](compose.example-wrap.yaml)
+and the two-patterns section in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 That's it. anchord doesn't plumb the macvlan itself — Docker handles
 that and hands anchord a regular interface. anchord watches the docker
@@ -313,8 +316,9 @@ keeps reservations stable across recreates.
 
 | Variable                            | Required | Default   | Notes |
 |-------------------------------------|----------|-----------|-------|
-| `ANCHORD_GATEWAY_HOSTNAME`          | no       | `anchord` | Compose-network DNS name to look up for the network-anchor's transit IP |
-| `ANCHORD_GATEWAY_RESOLVE_INTERVAL`  | no       | `5s`      | How often the service-anchor re-resolves and reconciles its default route |
+| `ANCHORD_GATEWAY_HOSTNAME`          | no       | `anchord` | Compose-network DNS name to look up for the network-anchor's transit IP. Ignored when `ANCHORD_GATEWAY_IP` is set |
+| `ANCHORD_GATEWAY_IP`                | no       |           | Explicit gateway address(es), comma-separated v4 and/or v6 (e.g. `192.168.0.1,fd00::1`). When set, skips DNS resolution and routes directly to these addresses. Required for the wrap pattern (F-40) where the service-anchor runs inside a target container belonging to a different Compose project |
+| `ANCHORD_GATEWAY_RESOLVE_INTERVAL`  | no       | `5s`      | How often the service-anchor re-resolves and reconciles its default route (DNS mode only — has no effect when `ANCHORD_GATEWAY_IP` is set) |
 
 ## Container labels
 

@@ -14,8 +14,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -102,11 +104,22 @@ type NetworkAnchor struct {
 // ServiceAnchor holds resolved settings for the service-anchor mode.
 type ServiceAnchor struct {
 	// GatewayHostname is the Docker-DNS name to look up for the
-	// network-anchor's transit IP. Default "anchord".
+	// network-anchor's transit IP. Default "anchord". Ignored when
+	// GatewayIPs is non-empty.
 	GatewayHostname string
 
+	// GatewayIPs is the explicit gateway address list (one v4 and/or
+	// one v6, comma-separated in ANCHORD_GATEWAY_IP). When non-empty,
+	// the service-anchor skips DNS resolution and routes directly to
+	// these addresses. Needed for wrap-pattern deployments where the
+	// service-anchor lives in a container belonging to a different
+	// Compose project than the network-anchor, so the target's Docker
+	// DNS can't see the wrap-stack's `anchord` service (SPEC F-40).
+	GatewayIPs []net.IP
+
 	// ResolveInterval is how often the service-anchor mode re-resolves
-	// the gateway hostname and reconciles its default route.
+	// the gateway hostname and reconciles its default route. Has no
+	// effect when GatewayIPs is set (IP mode is static).
 	ResolveInterval time.Duration
 
 	// LogLevel: debug, info, warn, error.
@@ -165,7 +178,11 @@ func LoadServiceAnchor() (*ServiceAnchor, error) {
 		LogLevel:        getenvDefault("ANCHORD_LOG_LEVEL", "info"),
 		MetricsAddr:     metricsAddrFromEnv(),
 	}
-	var err error
+	ips, err := parseGatewayIPs(os.Getenv("ANCHORD_GATEWAY_IP"))
+	if err != nil {
+		return nil, err
+	}
+	c.GatewayIPs = ips
 	c.ResolveInterval, err = parseDuration("ANCHORD_GATEWAY_RESOLVE_INTERVAL", 5*time.Second)
 	if err != nil {
 		return nil, err
@@ -174,6 +191,45 @@ func LoadServiceAnchor() (*ServiceAnchor, error) {
 		return nil, fmt.Errorf("ANCHORD_GATEWAY_RESOLVE_INTERVAL must be positive")
 	}
 	return c, nil
+}
+
+// parseGatewayIPs reads ANCHORD_GATEWAY_IP as a comma-separated list
+// of at most one IPv4 and one IPv6 address. Empty input returns
+// (nil, nil) so the caller falls back to DNS-based resolution.
+//
+// Malformed addresses are fatal — silently dropping a typo into the
+// DNS fallback would mask the misconfiguration; F-40 acceptance
+// requires loud failure.
+func parseGatewayIPs(raw string) ([]net.IP, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []net.IP
+	var sawV4, sawV6 bool
+	for _, part := range strings.Split(raw, ",") {
+		s := strings.TrimSpace(part)
+		if s == "" {
+			continue
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return nil, fmt.Errorf("ANCHORD_GATEWAY_IP=%q is not a valid IP", s)
+		}
+		if ip.To4() != nil {
+			if sawV4 {
+				return nil, fmt.Errorf("ANCHORD_GATEWAY_IP lists more than one IPv4 address")
+			}
+			sawV4 = true
+			out = append(out, ip.To4())
+		} else {
+			if sawV6 {
+				return nil, fmt.Errorf("ANCHORD_GATEWAY_IP lists more than one IPv6 address")
+			}
+			sawV6 = true
+			out = append(out, ip)
+		}
+	}
+	return out, nil
 }
 
 // parseAddressMode maps the raw env value to an AddressMode. Empty

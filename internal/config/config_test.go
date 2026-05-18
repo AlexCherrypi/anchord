@@ -287,8 +287,112 @@ func TestLoadServiceAnchor_Overrides(t *testing.T) {
 func TestLoadServiceAnchor_RejectsZeroInterval(t *testing.T) {
 	t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
 	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "0")
+	t.Setenv("ANCHORD_GATEWAY_IP", "")
 	if _, err := LoadServiceAnchor(); err == nil {
 		t.Fatal("expected error for zero interval")
+	}
+}
+
+// F-40: ANCHORD_GATEWAY_IP single-value parsing for either family.
+func TestLoadServiceAnchor_GatewayIPSingle(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want string // expected IP.String() of the single parsed result
+	}{
+		{"v4", "192.168.150.1", "192.168.150.1"},
+		{"v6", "fd00::1", "fd00::1"},
+		{"v4 with whitespace", "  10.0.0.5  ", "10.0.0.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
+			t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "")
+			t.Setenv("ANCHORD_GATEWAY_IP", tc.val)
+			cfg, err := LoadServiceAnchor()
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if len(cfg.GatewayIPs) != 1 {
+				t.Fatalf("got %d IPs, want 1", len(cfg.GatewayIPs))
+			}
+			if cfg.GatewayIPs[0].String() != tc.want {
+				t.Errorf("got %q, want %q", cfg.GatewayIPs[0].String(), tc.want)
+			}
+		})
+	}
+}
+
+// F-40: comma-separated v4+v6 pair, in either order.
+func TestLoadServiceAnchor_GatewayIPDualStack(t *testing.T) {
+	for _, raw := range []string{
+		"192.168.150.1,fd00::1",
+		"fd00::1, 192.168.150.1", // order independence + whitespace
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
+			t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "")
+			t.Setenv("ANCHORD_GATEWAY_IP", raw)
+			cfg, err := LoadServiceAnchor()
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if len(cfg.GatewayIPs) != 2 {
+				t.Fatalf("got %d IPs, want 2 (one v4 + one v6)", len(cfg.GatewayIPs))
+			}
+			var v4, v6 bool
+			for _, ip := range cfg.GatewayIPs {
+				if ip.To4() != nil {
+					v4 = true
+				} else {
+					v6 = true
+				}
+			}
+			if !v4 || !v6 {
+				t.Errorf("expected one of each family, got %v", cfg.GatewayIPs)
+			}
+		})
+	}
+}
+
+// F-40: malformed IP must be a fatal error (loud), not silently fall
+// back to DNS — operators need to see misconfiguration.
+func TestLoadServiceAnchor_GatewayIPInvalid(t *testing.T) {
+	t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
+	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "")
+	t.Setenv("ANCHORD_GATEWAY_IP", "not-an-ip")
+	_, err := LoadServiceAnchor()
+	if err == nil {
+		t.Fatal("expected error for malformed IP")
+	}
+	if !strings.Contains(err.Error(), "ANCHORD_GATEWAY_IP") {
+		t.Errorf("error should mention the env var name, got: %v", err)
+	}
+}
+
+// F-40: two IPs of the same family is a configuration error — we
+// only accept one v4 + one v6.
+func TestLoadServiceAnchor_GatewayIPDuplicateFamily(t *testing.T) {
+	t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
+	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "")
+	t.Setenv("ANCHORD_GATEWAY_IP", "10.0.0.1,10.0.0.2")
+	_, err := LoadServiceAnchor()
+	if err == nil {
+		t.Fatal("expected error for two v4 IPs")
+	}
+}
+
+// F-40: empty/unset means fall back to DNS mode (existing behaviour).
+func TestLoadServiceAnchor_GatewayIPEmpty(t *testing.T) {
+	t.Setenv("ANCHORD_GATEWAY_HOSTNAME", "")
+	t.Setenv("ANCHORD_GATEWAY_RESOLVE_INTERVAL", "")
+	t.Setenv("ANCHORD_GATEWAY_IP", "")
+	cfg, err := LoadServiceAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(cfg.GatewayIPs) != 0 {
+		t.Errorf("empty env should yield no IPs (DNS-mode fallback), got %v", cfg.GatewayIPs)
 	}
 }
 

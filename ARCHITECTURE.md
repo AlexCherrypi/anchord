@@ -134,6 +134,53 @@ and talk to service-anchors and to each other via Docker's built-in
 DNS. They never get an `anchord.expose` label and anchord ignores them
 entirely.
 
+## Two deployment patterns (F-41)
+
+The three roles above describe what runs *in* an anchord-managed
+project. There are two distinct patterns for how that project relates
+to the application:
+
+### Greenfield pattern (the original)
+
+You write the compose. Every app container that wants to be reachable
+joins a service-anchor's namespace via `network_mode: service:<anchor>`.
+Labels live on the service-anchors. Service-anchors find the
+network-anchor by Docker DNS over the project's `transit` bridge.
+
+This is what [compose.example.yaml](compose.example.yaml) demonstrates
+and what the [SPEC.md §2.6](SPEC.md) F-24..F-29 contract was written for.
+Best fit for new stacks where you control the compose end-to-end.
+
+### Wrap pattern (F-39 + F-40 + F-41)
+
+You wrap an *existing* Compose project (Mailcow, Nextcloud-AIO, …)
+without touching its compose file. anchord runs alongside as a
+separate Compose project; one service-anchor per labelled backend
+enters that backend's netns from the outside via
+`network_mode: "container:<backend>"` and installs the wrap-stack's
+default route there.
+
+Two ingredients make this work:
+
+- **F-39 record + restore**: when the service-anchor enters an
+  existing container's netns, that netns already has Docker's
+  bridge-default-gateway as its default route. The service-anchor
+  snapshots that gateway at startup, replaces it with the
+  wrap-stack's anchord, and restores the original on SIGTERM. Without
+  the restore, tearing down the wrap would leave the wrapped app with
+  no egress until Docker recreates it.
+- **F-40 `ANCHORD_GATEWAY_IP`**: the service-anchor is now inside a
+  container that belongs to a different Compose project; Docker DNS
+  for that project doesn't know about the wrap-stack's `anchord`
+  service. The operator pins the network-anchor's IP on the shared
+  wrap_transit bridge and points service-anchors at that IP — no
+  DNS, no re-resolution, no cross-project name gymnastics.
+
+The two patterns share the same network-anchor binary and the same
+nftables surface — the differences are purely on the service-anchor
+side and in compose. See [compose.example-wrap.yaml](compose.example-wrap.yaml)
+for a complete Mailcow-shaped wrap example.
+
 ## How traffic flows
 
 ### Inbound (a client connects from the LAN to port 25)

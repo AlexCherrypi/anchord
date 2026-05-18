@@ -1,0 +1,150 @@
+# Example: wrap-pattern (SPEC-WRAP-DRAFT F-41).
+#
+# Use this pattern when you want to wrap an *existing* Compose project
+# (Mailcow, Nextcloud-AIO, …) with anchord without modifying the
+# wrapped project's compose file. The greenfield pattern
+# (compose.example.yaml) requires every backend container to declare
+# `network_mode: service:<anchor>`, which isn't viable for
+# upstream-maintained stacks.
+#
+# What you write:
+#   1. The wrapped project stays exactly as upstream ships it.
+#   2. Add a single shared bridge to it (one-line override) so anchord
+#      can talk to its backends.
+#   3. Run THIS stack alongside (separate Compose project). It
+#      contains: the network-anchor, one service-anchor per labelled
+#      backend, optional docker-socket-proxy.
+#   4. Add `anchord.expose: "tcp/<port>,…"` labels to the wrapped
+#      project's backend containers via the same one-line override.
+#
+# What you get:
+#   - One IP on the LAN (DHCP-refreshed) for the wrapped project.
+#   - Inbound ports DNAT'd to the right backend container, real
+#     client source IP preserved.
+#   - Outbound from the wrapped project egresses with the wrap-stack's
+#     anchor IP (PTR/SPF identity = wrap stack, not host).
+#
+# Prerequisites (one-time, per host):
+#
+#   docker network create -d macvlan \
+#       -o parent=eth0.42 \
+#       --subnet=192.168.150.0/24 --gateway=192.168.150.1 \
+#       dmz_macvlan
+#
+# Then on the WRAPPED project (e.g. mailcow), via an override file:
+#
+#   networks:
+#     wrap_transit:
+#       external: true
+#       name: ix-mailcow_wrap-transit   # whatever your wrapped project chose
+#   services:
+#     nginx-mailcow:
+#       networks: [..., wrap_transit]
+#       labels:
+#         anchord.expose: "tcp/80,tcp/443"
+#     postfix-mailcow:
+#       networks: [..., wrap_transit]
+#       labels:
+#         anchord.expose: "tcp/25,tcp/465,tcp/587"
+#     dovecot-mailcow:
+#       networks: [..., wrap_transit]
+#       labels:
+#         anchord.expose: "tcp/143,tcp/993"
+
+name: mailcow-anchord-wrap
+
+networks:
+  dmz:
+    external: true
+    name: dmz_macvlan
+  wrap_transit:
+    # Shared with the wrapped project (mailcow above). Anchord uses
+    # this network to (a) reach the wrapped backends for DNAT and
+    # (b) be reachable from in-container service-anchors via Docker DNS.
+    external: true
+    name: ix-mailcow_wrap-transit
+
+services:
+
+  # ---------- network-anchor ----------------------------------------------
+  anchord:
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add: [NET_ADMIN]
+    mac_address: "02:4c:4b:50:0a:01"   # pinned for stable DHCP
+    # Forwarding sysctls — anchord routes between dmz and the wrap
+    # transit bridge.
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.accept_ra: "2"
+    networks:
+      dmz:
+        ipv4_address: 192.168.150.100   # bootstrap IP for the LAN
+        priority: 1000                  # bias dmz to be default-route source
+      wrap_transit:
+        # Pin our wrap_transit IP and alias so service-anchors can
+        # find us via Docker DNS *or* fall back to ANCHORD_GATEWAY_IP.
+        ipv4_address: 172.30.0.2
+        aliases: [anchord]
+    environment:
+      # Anchord watches the wrapped project's containers for labels —
+      # so ANCHORD_PROJECT must equal the wrapped project's compose
+      # name, not this wrap stack's name.
+      ANCHORD_PROJECT: ix-mailcow
+      ANCHORD_EXT_NETWORK: dmz_macvlan      # F-37 — robust iface pick
+      ANCHORD_ADDRESS_MODE: dhcp-refresh
+      ANCHORD_DHCP_HOSTNAME: mailcow
+      DOCKER_HOST: tcp://docker-proxy:2375
+    depends_on: [docker-proxy]
+    restart: unless-stopped
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      NETWORKS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [wrap_transit]
+    restart: unless-stopped
+
+  # ---------- service-anchors -- one per labelled wrapped backend ---------
+  # Each enters its target's netns via `network_mode: container:<target>`
+  # (F-39) and installs the wrap-stack's default route. On SIGTERM the
+  # service-anchor restores the target's original Docker bridge gateway
+  # so the wrapped container retains egress when the wrap is torn down.
+  #
+  # `ANCHORD_GATEWAY_IP` (F-40) is used instead of DNS resolution because
+  # the target container's Docker DNS belongs to the wrapped project and
+  # has no record for this wrap stack's `anchord` service.
+  nginx-anchor:
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add: [NET_ADMIN]
+    network_mode: "container:ix-mailcow-nginx-mailcow-1"
+    environment:
+      ANCHORD_MODE: service-anchor
+      ANCHORD_GATEWAY_IP: 172.30.0.2     # pinned anchord IP on wrap_transit
+    restart: unless-stopped
+    depends_on: [anchord]
+
+  postfix-anchor:
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add: [NET_ADMIN]
+    network_mode: "container:ix-mailcow-postfix-mailcow-1"
+    environment:
+      ANCHORD_MODE: service-anchor
+      ANCHORD_GATEWAY_IP: 172.30.0.2
+    restart: unless-stopped
+    depends_on: [anchord]
+
+  dovecot-anchor:
+    image: ghcr.io/alexcherrypi/anchord:latest
+    cap_add: [NET_ADMIN]
+    network_mode: "container:ix-mailcow-dovecot-mailcow-1"
+    environment:
+      ANCHORD_MODE: service-anchor
+      ANCHORD_GATEWAY_IP: 172.30.0.2
+    restart: unless-stopped
+    depends_on: [anchord]
