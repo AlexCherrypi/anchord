@@ -55,13 +55,62 @@ The network-anchor still needs `CAP_NET_ADMIN` (for nftables and, in dhcp-refres
 
 It is now a regular Docker container on the macvlan network.
 
+### F-37 (new) — Deterministic external-interface resolution
+
+In any compose stack with more than one network (i.e. every realistic anchord-v2 deployment: `dmz` external + `transit` internal), Docker's `eth0`/`eth1` assignment on container recreate is **not deterministic** — empirical measurement over 8 sequential redeploys of the same compose file gave a 4:4 split. Picking the external interface purely by in-container name (`ANCHORD_EXT_IFACE`, default `eth0`) is therefore unsafe: with ~50 % probability anchord installs DHCP and nft `iifname`/`oifname` matches on the *internal* transit endpoint, breaking MASQUERADE egress and DHCP-refresh.
+
+To eliminate the coin-flip, anchord supports an alternative selection mechanism keyed on the **Docker network name**, not the in-container iface name. The compose author already declared which network is the external one (the `external: true` macvlan); anchord asks Docker which local interface attaches to that network.
+
+#### Selection precedence
+
+On startup the network-anchor resolves its external interface as follows, in order:
+
+1. **`ANCHORD_EXT_NETWORK` set** → look the iface up via the Docker API (algorithm below). Failure after the retry window is fatal.
+2. **`ANCHORD_EXT_IFACE` set (and `ANCHORD_EXT_NETWORK` not)** → use that name directly, as today.
+3. **Neither set** → default `ANCHORD_EXT_IFACE=eth0`.
+
+If both are set, `ANCHORD_EXT_NETWORK` wins and a WARN log is emitted (`both EXT_NETWORK and EXT_IFACE set; using EXT_NETWORK`). Not fatal — operators may use both during migration.
+
+#### Lookup algorithm (when `ANCHORD_EXT_NETWORK=<name>` is set)
+
+1. Determine the container's own ID. Source: `os.Hostname()` — Docker sets this to the short container ID — same mechanism already used by `detectSharedNetwork`.
+2. Call the Docker Engine API (over the existing `DOCKER_HOST`): `GET /containers/<self-id>/json`.
+3. Read `NetworkSettings.Networks[<name>].MacAddress`. If the network is absent, retry (see below).
+4. Enumerate local interfaces via netlink and match by MAC address — not name, not index.
+5. The matched interface is what every downstream subsystem (DHCP supervisor, nat manager, IP watcher, readiness tracker) uses as its `ExtIfaceName`.
+
+**Why MAC, not name or index:** Docker honours the `mac_address:` compose field by stamping that MAC onto the macvlan endpoint, and it surfaces in the API response. MACs are unique per netns by Linux invariant. The algorithm also works when the operator did not pin a MAC — Docker generates one and reports it identically.
+
+#### Retry and failure modes
+
+- **Resolution is one-shot at startup**, before the DHCP supervisor and nat manager spin up. The interface assignment cannot change during a container's lifetime; only a recreate changes it, and that re-runs the whole binary.
+- **Initial-attach race:** very early in startup the API may return container JSON without the target network yet listed (compose-up race). Retry with exponential backoff (start 100 ms, double, cap 2 s) for up to 10 s, then fail.
+- **Failure cases (all fatal, `os.Exit` non-zero, ERROR log with the reason):**
+  - `network X not found in container's NetworkSettings`
+  - `MAC Y from docker not present on any local interface`
+  - `docker API unreachable: <error>`
+- **Success log (INFO):** `external interface resolved by network` with fields `network`, `iface`, `mac`.
+
+#### Scope
+
+- Applies **only** to `ANCHORD_MODE=network-anchor`. Service-anchor mode ignores `ANCHORD_EXT_NETWORK` entirely — it routes via Docker DNS, not via netlink iface names.
+- No additional socket-proxy permission required; `CONTAINERS=1` is already on in the documented setup and is what backs the `containers/json` call.
+- Multiple interfaces with the same MAC (impossible in a sane netns) → take the first match, WARN.
+
+#### Backwards compatibility
+
+- Stacks that do not set `ANCHORD_EXT_NETWORK` are unaffected; the existing `ANCHORD_EXT_IFACE`/default-`eth0` path is exercised unchanged.
+- Stacks with `ANCHORD_EXT_IFACE` and exactly one network keep working as today (Docker can only put that one network on `eth0`).
+- Stacks with `ANCHORD_EXT_IFACE` and 2+ networks are running on a coin flip — documented recommendation: migrate to `ANCHORD_EXT_NETWORK`.
+
 ## Environment variable changes
 
 | Variable | v1 | v2 |
 |---|---|---|
 | `ANCHORD_PROJECT` | required | unchanged |
 | `ANCHORD_VLAN_PARENT` | required | **removed** (Docker owns the parent) |
-| `ANCHORD_EXT_IFACE` | name of the macvlan child anchord creates, default `anchord-ext` | name of the macvlan iface Docker plumbed in, default `eth0` |
+| `ANCHORD_EXT_NETWORK` | — | **new**; Docker network name of the external macvlan. When set, anchord resolves its iface via the Docker API by MAC match. Preferred over `ANCHORD_EXT_IFACE` for any stack with 2+ networks |
+| `ANCHORD_EXT_IFACE` | name of the macvlan child anchord creates, default `anchord-ext` | name of the in-container iface, default `eth0`. Used only when `ANCHORD_EXT_NETWORK` is unset; unreliable on multi-network stacks |
 | `ANCHORD_EXT_MAC` | optional, derived from project name otherwise | **removed** — declare via `mac_address:` in compose |
 | `ANCHORD_ADDRESS_MODE` | — | **new**, default `bootstrap` |
 | `ANCHORD_DHCP_HOSTNAME` | unchanged | unchanged (also basis of DHCP client-id) |
