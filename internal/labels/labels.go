@@ -5,6 +5,16 @@
 //	labels:
 //	  anchord.expose:    "tcp/25,tcp/465,udp/4500"
 //	  anchord.expose.v6: "auto"   # default; "off" to disable v6
+//
+// F-46 port-translating DNAT: each entry may carry an optional
+// backend-port suffix to express "DMZ-side port 636 maps to the
+// backend's port 6636". Syntax: <proto>/<dmz_port>[:<backend_port>].
+// When the suffix is omitted, BackendPort defaults to Port — same
+// behaviour as before F-46.
+//
+//	labels:
+//	  anchord.expose: "tcp/636:6636"     # DMZ 636 -> backend 6636
+//	  anchord.expose: "tcp/443,tcp/636:6636"   # mixed entries fine
 package labels
 
 import (
@@ -19,10 +29,21 @@ const (
 )
 
 // Rule is one port/proto exposure entry.
+//
+// F-46: Port is the DMZ-side listen port (what clients connect to);
+// BackendPort is the port on the backend container the connection is
+// DNAT'd to. When the operator writes "tcp/636" without a translation
+// suffix, BackendPort equals Port. When they write "tcp/636:6636",
+// Port=636 and BackendPort=6636.
 type Rule struct {
-	Proto string // "tcp" or "udp"
-	Port  uint16
+	Proto       string // "tcp" or "udp"
+	Port        uint16 // DMZ-side port (what clients connect to)
+	BackendPort uint16 // backend-side port (where the DNAT lands)
 }
+
+// Translates reports whether this rule changes the destination port
+// during DNAT. False for the common case where Port==BackendPort.
+func (r Rule) Translates() bool { return r.Port != r.BackendPort }
 
 // V6Mode controls IPv6 exposure for a container.
 type V6Mode int
@@ -76,7 +97,7 @@ func Parse(lbl map[string]string) (*Spec, error) {
 }
 
 func parseRule(s string) (Rule, error) {
-	proto, portStr, ok := strings.Cut(s, "/")
+	proto, rest, ok := strings.Cut(s, "/")
 	if !ok {
 		return Rule{}, fmt.Errorf("expected proto/port (e.g. tcp/25)")
 	}
@@ -86,9 +107,39 @@ func parseRule(s string) (Rule, error) {
 	default:
 		return Rule{}, fmt.Errorf("unsupported proto %q (tcp|udp)", proto)
 	}
-	port, err := strconv.ParseUint(strings.TrimSpace(portStr), 10, 16)
-	if err != nil || port == 0 {
-		return Rule{}, fmt.Errorf("invalid port %q", portStr)
+
+	// F-46: port spec is now "<dmz_port>[:<backend_port>]". The
+	// optional second port translates the destination on DNAT.
+	dmzStr, backendStr, hasBackend := strings.Cut(rest, ":")
+	dmzPort, err := parsePort(dmzStr)
+	if err != nil {
+		return Rule{}, fmt.Errorf("invalid dmz port %q: %w", dmzStr, err)
 	}
-	return Rule{Proto: proto, Port: uint16(port)}, nil
+	backendPort := dmzPort
+	if hasBackend {
+		bp, err := parsePort(backendStr)
+		if err != nil {
+			return Rule{}, fmt.Errorf("invalid backend port %q: %w", backendStr, err)
+		}
+		backendPort = bp
+	}
+	return Rule{Proto: proto, Port: dmzPort, BackendPort: backendPort}, nil
+}
+
+// parsePort accepts "1".."65535" with surrounding whitespace and
+// rejects 0, empty, non-numeric, and out-of-range values with
+// distinct error messages so the caller can wrap them with context.
+func parsePort(s string) (uint16, error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return 0, fmt.Errorf("empty port")
+	}
+	port, err := strconv.ParseUint(trimmed, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("not a 16-bit integer")
+	}
+	if port == 0 {
+		return 0, fmt.Errorf("port 0 is reserved")
+	}
+	return uint16(port), nil
 }

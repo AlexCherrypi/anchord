@@ -53,50 +53,81 @@ func newManager(t *testing.T) *Manager {
 	return m
 }
 
-// readMap reads the kernel's current view of an anchord DNAT map.
-func readMap(t *testing.T, family Family, mapName string) map[uint16]string {
+// readMap reads the kernel's current view of an anchord DNAT
+// (addr, port) pair by joining the two per-(family, proto) maps.
+// mapBase is "dnat_tcp" or "dnat_udp" — the address map; the port
+// map's name is derived as mapBase+"_port".
+//
+// F-46: the addr map's value is just the IP bytes (4 for v4 / 16
+// for v6); the port map's value is a 2-byte BE port. We zip them on
+// the shared DMZ-port key.
+func readMap(t *testing.T, family Family, mapBase string) map[uint16]Target {
 	t.Helper()
 	c := &nftables.Conn{}
 	tbl := &nftables.Table{Name: tableV4, Family: nftables.TableFamilyIPv4}
 	if family == V6 {
 		tbl = &nftables.Table{Name: tableV6, Family: nftables.TableFamilyIPv6}
 	}
-	set, err := c.GetSetByName(tbl, mapName)
-	if err != nil {
-		t.Fatalf("GetSetByName(%s): %v", mapName, err)
-	}
-	elems, err := c.GetSetElements(set)
-	if err != nil {
-		t.Fatalf("GetSetElements(%s): %v", mapName, err)
-	}
-	out := make(map[uint16]string, len(elems))
-	for _, e := range elems {
-		port := binaryutil.BigEndian.Uint16(e.Key)
-		out[port] = net.IP(e.Val).String()
-	}
-	return out
-}
 
-// stateToStrings converts a SetMap-shaped state into the same form
-// readMap returns, so we can compare directly.
-func stateToStrings(s map[uint16]net.IP, family Family) map[uint16]string {
-	out := make(map[uint16]string, len(s))
-	for port, ip := range s {
-		if family == V4 {
-			out[port] = ip.To4().String()
-		} else {
-			out[port] = ip.To16().String()
+	addrElems := readSetElements(t, c, tbl, mapBase)
+	portElems := readSetElements(t, c, tbl, mapBase+"_port")
+
+	out := make(map[uint16]Target, len(addrElems))
+	for _, e := range addrElems {
+		key := binaryutil.BigEndian.Uint16(e.Key)
+		out[key] = Target{IP: net.IP(e.Val)}
+	}
+	for _, e := range portElems {
+		key := binaryutil.BigEndian.Uint16(e.Key)
+		tgt := out[key]
+		if len(e.Val) < 2 {
+			t.Fatalf("port map element val too short: %d bytes", len(e.Val))
+		}
+		tgt.Port = binaryutil.BigEndian.Uint16(e.Val[:2])
+		out[key] = tgt
+	}
+	// Drop entries that only appeared in the port map (shouldn't
+	// happen in practice but keeps the test honest about the
+	// invariant: both maps stay in lockstep).
+	for k, v := range out {
+		if v.IP == nil {
+			delete(out, k)
 		}
 	}
 	return out
 }
 
-func mapsEqual(a, b map[uint16]string) bool {
+func readSetElements(t *testing.T, c *nftables.Conn, tbl *nftables.Table, name string) []nftables.SetElement {
+	t.Helper()
+	set, err := c.GetSetByName(tbl, name)
+	if err != nil {
+		t.Fatalf("GetSetByName(%s): %v", name, err)
+	}
+	elems, err := c.GetSetElements(set)
+	if err != nil {
+		t.Fatalf("GetSetElements(%s): %v", name, err)
+	}
+	return elems
+}
+
+// normalizeIP returns the canonical-string form of a Target's IP
+// for the family. Used by mapsEqual to avoid v4 surrogate-form
+// mismatches.
+func normalizeIP(ip net.IP, family Family) string {
+	if family == V4 {
+		return ip.To4().String()
+	}
+	return ip.To16().String()
+}
+
+// targetsEqual compares two read-back / expected target maps.
+func targetsEqual(a, b map[uint16]Target, family Family) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for k, v := range a {
-		if b[k] != v {
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || va.Port != vb.Port || normalizeIP(va.IP, family) != normalizeIP(vb.IP, family) {
 			return false
 		}
 	}
@@ -154,8 +185,8 @@ func TestIntegrationSetupIsIdempotent(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("after re-Setup, dnat_tcp should be empty, got %v", got)
 	}
-	if err := m.SetMap(V4, "tcp", map[uint16]net.IP{
-		25: net.IPv4(10, 0, 0, 25),
+	if err := m.SetMap(V4, "tcp", map[uint16]Target{
+		25: {IP: net.IPv4(10, 0, 0, 25), Port: 25},
 	}); err != nil {
 		t.Fatalf("SetMap after re-Setup: %v", err)
 	}
@@ -165,18 +196,17 @@ func TestIntegrationSetMapV4Populate(t *testing.T) {
 	requireNetAdmin(t)
 	m := newManager(t)
 
-	state := map[uint16]net.IP{
-		25:  net.IPv4(10, 0, 0, 25),
-		80:  net.IPv4(10, 0, 0, 80),
-		443: net.IPv4(10, 0, 0, 244),
+	state := map[uint16]Target{
+		25:  {IP: net.IPv4(10, 0, 0, 25), Port: 25},
+		80:  {IP: net.IPv4(10, 0, 0, 80), Port: 80},
+		443: {IP: net.IPv4(10, 0, 0, 244), Port: 443},
 	}
 	if err := m.SetMap(V4, "tcp", state); err != nil {
 		t.Fatalf("SetMap: %v", err)
 	}
 	got := readMap(t, V4, "dnat_tcp")
-	want := stateToStrings(state, V4)
-	if !mapsEqual(got, want) {
-		t.Errorf("after SetMap got %v want %v", got, want)
+	if !targetsEqual(got, state, V4) {
+		t.Errorf("after SetMap got %v want %v", got, state)
 	}
 }
 
@@ -184,17 +214,114 @@ func TestIntegrationSetMapV6Populate(t *testing.T) {
 	requireNetAdmin(t)
 	m := newManager(t)
 
-	state := map[uint16]net.IP{
-		25:  net.ParseIP("fd99::25"),
-		443: net.ParseIP("fd99::443"),
+	state := map[uint16]Target{
+		25:  {IP: net.ParseIP("fd99::25"), Port: 25},
+		443: {IP: net.ParseIP("fd99::443"), Port: 443},
 	}
 	if err := m.SetMap(V6, "tcp", state); err != nil {
 		t.Fatalf("SetMap: %v", err)
 	}
 	got := readMap(t, V6, "dnat_tcp")
-	want := stateToStrings(state, V6)
-	if !mapsEqual(got, want) {
-		t.Errorf("after SetMap got %v want %v", got, want)
+	if !targetsEqual(got, state, V6) {
+		t.Errorf("after SetMap got %v want %v", got, state)
+	}
+}
+
+// F-46: port-translating entry — the entry must NOT appear in the
+// address map (which is reserved for non-translating entries) and
+// instead lives as a literal-DNAT rule in the dnat_xlat_tcp chain.
+// Pinned regression on the Authentik LDAPS case (636 -> 6636).
+func TestIntegrationSetMapPortTranslation(t *testing.T) {
+	requireNetAdmin(t)
+	m := newManager(t)
+
+	state := map[uint16]Target{
+		636: {IP: net.IPv4(172, 31, 80, 9), Port: 6636},
+	}
+	if err := m.SetMap(V4, "tcp", state); err != nil {
+		t.Fatalf("SetMap: %v", err)
+	}
+
+	// Address map must be empty — translating entries don't use it.
+	if got := readMap(t, V4, "dnat_tcp"); len(got) != 0 {
+		t.Errorf("address map should be empty for translation-only state, got %v", got)
+	}
+
+	// Sub-chain must hold one rule.
+	c := &nftables.Conn{}
+	tbl := &nftables.Table{Name: tableV4, Family: nftables.TableFamilyIPv4}
+	rules, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "dnat_xlat_tcp"})
+	if err != nil {
+		t.Fatalf("GetRules(dnat_xlat_tcp): %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("dnat_xlat_tcp should have exactly 1 rule, got %d", len(rules))
+	}
+}
+
+// F-46: mixed translating + non-translating entries — non-translating
+// ones go to the address map, translating ones go to the sub-chain.
+// Both code paths exercised in one SetMap call.
+func TestIntegrationSetMapMixedTranslation(t *testing.T) {
+	requireNetAdmin(t)
+	m := newManager(t)
+
+	state := map[uint16]Target{
+		25:  {IP: net.IPv4(10, 0, 0, 25), Port: 25},     // non-translating
+		80:  {IP: net.IPv4(10, 0, 0, 80), Port: 80},     // non-translating
+		636: {IP: net.IPv4(10, 0, 6, 36), Port: 6636},  // translating
+	}
+	if err := m.SetMap(V4, "tcp", state); err != nil {
+		t.Fatalf("SetMap: %v", err)
+	}
+
+	// Address map must hold the two non-translating entries only.
+	got := readMap(t, V4, "dnat_tcp")
+	if len(got) != 2 {
+		t.Errorf("address map should have 2 non-translating entries, got %d (%v)", len(got), got)
+	}
+	if _, ok := got[636]; ok {
+		t.Error("translating entry 636 must not appear in address map")
+	}
+
+	// Sub-chain must hold one rule (the translating entry).
+	c := &nftables.Conn{}
+	tbl := &nftables.Table{Name: tableV4, Family: nftables.TableFamilyIPv4}
+	rules, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "dnat_xlat_tcp"})
+	if err != nil {
+		t.Fatalf("GetRules(dnat_xlat_tcp): %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("dnat_xlat_tcp should have exactly 1 rule for the translating entry, got %d", len(rules))
+	}
+}
+
+// F-46: dropping a translating entry from SetMap must remove its
+// sub-chain rule. Verifies the FlushChain+repopulate semantics.
+func TestIntegrationSetMapTranslationCleanupOnRemoval(t *testing.T) {
+	requireNetAdmin(t)
+	m := newManager(t)
+
+	// Install a translating entry.
+	if err := m.SetMap(V4, "tcp", map[uint16]Target{
+		636: {IP: net.IPv4(10, 0, 0, 9), Port: 6636},
+	}); err != nil {
+		t.Fatalf("first SetMap: %v", err)
+	}
+
+	// Replace with empty — translating rule must vanish.
+	if err := m.SetMap(V4, "tcp", map[uint16]Target{}); err != nil {
+		t.Fatalf("empty SetMap: %v", err)
+	}
+
+	c := &nftables.Conn{}
+	tbl := &nftables.Table{Name: tableV4, Family: nftables.TableFamilyIPv4}
+	rules, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "dnat_xlat_tcp"})
+	if err != nil {
+		t.Fatalf("GetRules(dnat_xlat_tcp): %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("dnat_xlat_tcp should be empty after entry removal, got %d rules", len(rules))
 	}
 }
 
@@ -205,24 +332,23 @@ func TestIntegrationSetMapReplaceRemovesStale(t *testing.T) {
 	requireNetAdmin(t)
 	m := newManager(t)
 
-	if err := m.SetMap(V4, "tcp", map[uint16]net.IP{
-		25: net.IPv4(10, 0, 0, 25),
-		80: net.IPv4(10, 0, 0, 80),
+	if err := m.SetMap(V4, "tcp", map[uint16]Target{
+		25: {IP: net.IPv4(10, 0, 0, 25), Port: 25},
+		80: {IP: net.IPv4(10, 0, 0, 80), Port: 80},
 	}); err != nil {
 		t.Fatalf("first SetMap: %v", err)
 	}
 
-	next := map[uint16]net.IP{
-		25:  net.IPv4(10, 0, 0, 250),
-		443: net.IPv4(10, 0, 0, 244),
+	next := map[uint16]Target{
+		25:  {IP: net.IPv4(10, 0, 0, 250), Port: 25},
+		443: {IP: net.IPv4(10, 0, 0, 244), Port: 443},
 	}
 	if err := m.SetMap(V4, "tcp", next); err != nil {
 		t.Fatalf("replace SetMap: %v", err)
 	}
 	got := readMap(t, V4, "dnat_tcp")
-	want := stateToStrings(next, V4)
-	if !mapsEqual(got, want) {
-		t.Errorf("after replace got %v want %v (port 80 should be gone, 25's value updated)", got, want)
+	if !targetsEqual(got, next, V4) {
+		t.Errorf("after replace got %v want %v (port 80 should be gone, 25's value updated)", got, next)
 	}
 	if _, lingered := got[80]; lingered {
 		t.Errorf("stale key 80 lingered after replace")
@@ -235,13 +361,13 @@ func TestIntegrationSetMapEmptyClears(t *testing.T) {
 	requireNetAdmin(t)
 	m := newManager(t)
 
-	if err := m.SetMap(V4, "udp", map[uint16]net.IP{
-		53:  net.IPv4(10, 0, 0, 53),
-		123: net.IPv4(10, 0, 0, 123),
+	if err := m.SetMap(V4, "udp", map[uint16]Target{
+		53:  {IP: net.IPv4(10, 0, 0, 53), Port: 53},
+		123: {IP: net.IPv4(10, 0, 0, 123), Port: 123},
 	}); err != nil {
 		t.Fatalf("populate SetMap: %v", err)
 	}
-	if err := m.SetMap(V4, "udp", map[uint16]net.IP{}); err != nil {
+	if err := m.SetMap(V4, "udp", map[uint16]Target{}); err != nil {
 		t.Fatalf("empty SetMap: %v", err)
 	}
 	got := readMap(t, V4, "dnat_udp")
@@ -278,39 +404,31 @@ func TestIntegrationReplaceIsAtomicPerWrite(t *testing.T) {
 	requireNetAdmin(t)
 	m := newManager(t)
 
-	stateA := map[uint16]net.IP{
-		25:  net.IPv4(10, 0, 0, 1),
-		80:  net.IPv4(10, 0, 0, 2),
-		443: net.IPv4(10, 0, 0, 3),
-		587: net.IPv4(10, 0, 0, 4),
-		993: net.IPv4(10, 0, 0, 5),
+	mkState := func(off int) map[uint16]Target {
+		return map[uint16]Target{
+			25:  {IP: net.IPv4(10, 0, 0, byte(1+off)), Port: 25},
+			80:  {IP: net.IPv4(10, 0, 0, byte(2+off)), Port: 80},
+			443: {IP: net.IPv4(10, 0, 0, byte(3+off)), Port: 443},
+			587: {IP: net.IPv4(10, 0, 0, byte(4+off)), Port: 587},
+			993: {IP: net.IPv4(10, 0, 0, byte(5+off)), Port: 993},
+		}
 	}
-	stateB := map[uint16]net.IP{
-		25:  net.IPv4(10, 0, 0, 11),
-		80:  net.IPv4(10, 0, 0, 12),
-		443: net.IPv4(10, 0, 0, 13),
-		587: net.IPv4(10, 0, 0, 14),
-		993: net.IPv4(10, 0, 0, 15),
-	}
-	wantA := stateToStrings(stateA, V4)
-	wantB := stateToStrings(stateB, V4)
+	stateA := mkState(0)
+	stateB := mkState(10)
 
 	deadline := time.Now().Add(time.Second)
 	flips := 0
 	for time.Now().Before(deadline) {
-		var state map[uint16]net.IP
-		var want map[uint16]string
-		if flips%2 == 0 {
-			state, want = stateA, wantA
-		} else {
-			state, want = stateB, wantB
+		state := stateA
+		if flips%2 != 0 {
+			state = stateB
 		}
 		if err := m.SetMap(V4, "tcp", state); err != nil {
 			t.Fatalf("SetMap flip %d: %v", flips, err)
 		}
 		got := readMap(t, V4, "dnat_tcp")
-		if !mapsEqual(got, want) {
-			t.Fatalf("flip %d: post-write dump diverged from written state\n  got:  %v\n  want: %v", flips, got, want)
+		if !targetsEqual(got, state, V4) {
+			t.Fatalf("flip %d: post-write dump diverged from written state\n  got:  %v\n  want: %v", flips, got, state)
 		}
 		flips++
 	}
@@ -329,8 +447,8 @@ func TestIntegrationConcurrentSetMapDifferentMaps(t *testing.T) {
 	requireNetAdmin(t)
 	m := newManager(t)
 
-	finalTCP := map[uint16]net.IP{25: net.IPv4(10, 0, 0, 25)}
-	finalUDP := map[uint16]net.IP{53: net.IPv4(10, 0, 0, 53)}
+	finalTCP := map[uint16]Target{25: {IP: net.IPv4(10, 0, 0, 25), Port: 25}}
+	finalUDP := map[uint16]Target{53: {IP: net.IPv4(10, 0, 0, 53), Port: 53}}
 
 	var wg sync.WaitGroup
 	deadline := time.Now().Add(500 * time.Millisecond)
@@ -357,11 +475,11 @@ func TestIntegrationConcurrentSetMapDifferentMaps(t *testing.T) {
 	wg.Wait()
 
 	// Final states must reflect the last write of each map.
-	if got, want := readMap(t, V4, "dnat_tcp"), stateToStrings(finalTCP, V4); !mapsEqual(got, want) {
-		t.Errorf("final tcp got %v want %v", got, want)
+	if got := readMap(t, V4, "dnat_tcp"); !targetsEqual(got, finalTCP, V4) {
+		t.Errorf("final tcp got %v want %v", got, finalTCP)
 	}
-	if got, want := readMap(t, V4, "dnat_udp"), stateToStrings(finalUDP, V4); !mapsEqual(got, want) {
-		t.Errorf("final udp got %v want %v", got, want)
+	if got := readMap(t, V4, "dnat_udp"); !targetsEqual(got, finalUDP, V4) {
+		t.Errorf("final udp got %v want %v", got, finalUDP)
 	}
 }
 
