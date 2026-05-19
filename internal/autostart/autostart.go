@@ -73,7 +73,7 @@ type CreateSpec struct {
 	Name        string
 	Image       string
 	Env         []string          // "K=V" pairs in deterministic order
-	Labels      map[string]string // includes com.docker.compose.project + anchord.managed-by
+	Labels      map[string]string // anchord.managed-by=f45; no compose.* labels (issue #2)
 	NetworkMode string            // "container:<Target>"
 	CapAdd      []string          // typically ["NET_ADMIN"]
 	Restart     string            // "unless-stopped"
@@ -83,9 +83,8 @@ type CreateSpec struct {
 // once at startup — used to fill F-45 defaults (image, IP on shared
 // network) when the operator hasn't supplied them.
 type SelfInfo struct {
-	Image            string            // anchord's own image, used as default for ManagedSA.Image
-	IPsByNetwork     map[string]string // network name -> IP (used to default GatewayIP)
-	ComposeProject   string            // copied into the managed SA's labels for clean teardown
+	Image        string            // anchord's own image, used as default for ManagedSA.Image
+	IPsByNetwork map[string]string // network name -> IP (used to default GatewayIP)
 }
 
 // dockerOps is the slice of Docker surface this package uses. Kept
@@ -405,14 +404,15 @@ func (w *Watcher) buildSpec(self SelfInfo) (CreateSpec, error) {
 		env = append(env, k+"="+envMap[k])
 	}
 
+	// Deliberately NO com.docker.compose.* labels (issue #2). F-45
+	// containers are out-of-band w.r.t. compose — anchord owns their
+	// lifecycle. Stamping `com.docker.compose.project` without
+	// `.service` puts the container in a half-claimed limbo that
+	// crashes Compose-aware orchestrators (TrueNAS app.stop trips on
+	// a raw KeyError for the missing .service key). Anchord's own
+	// `anchord.managed-by=f45` label is enough for bookkeeping.
 	labels := map[string]string{
 		"anchord.managed-by": "f45",
-	}
-	if self.ComposeProject != "" {
-		// Tag with the network-anchor's compose project so
-		// `docker compose down` of the wrap stack also removes the
-		// managed service-anchor — no operator-visible leftover.
-		labels["com.docker.compose.project"] = self.ComposeProject
 	}
 
 	return CreateSpec{
@@ -578,9 +578,6 @@ func (a dockerAdapter) InspectSelf(ctx context.Context) (SelfInfo, error) {
 	out := SelfInfo{
 		Image:        insp.Config.Image,
 		IPsByNetwork: map[string]string{},
-	}
-	if insp.Config != nil && insp.Config.Labels != nil {
-		out.ComposeProject = insp.Config.Labels["com.docker.compose.project"]
 	}
 	if insp.NetworkSettings != nil {
 		for name, n := range insp.NetworkSettings.Networks {

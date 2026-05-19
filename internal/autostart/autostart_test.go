@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -475,8 +476,7 @@ func TestRun_F45_CreatesAndStartsWhenSAAbsent(t *testing.T) {
 	}
 	ops := newFakeOps(nil)
 	ops.selfInfo = SelfInfo{
-		Image:          "ghcr.io/example/anchord:test",
-		ComposeProject: "ix-authentik",
+		Image: "ghcr.io/example/anchord:test",
 		IPsByNetwork: map[string]string{
 			"ix-authentik_transit": "172.31.80.181",
 		},
@@ -534,8 +534,16 @@ func TestRun_F45_CreatesAndStartsWhenSAAbsent(t *testing.T) {
 	if got.Restart != "unless-stopped" {
 		t.Errorf("Restart: got %q", got.Restart)
 	}
-	if got.Labels["com.docker.compose.project"] != "ix-authentik" {
-		t.Errorf("compose-project label missing, got %v", got.Labels)
+	// Issue #2: managed SA must NOT carry compose.* labels — F-45
+	// containers are out-of-band w.r.t. compose and a half-stamped
+	// `project` (without `service`) crashes orchestrators.
+	for k := range got.Labels {
+		if strings.HasPrefix(k, "com.docker.compose.") {
+			t.Errorf("managed SA must not carry compose.* labels, got %q in %v", k, got.Labels)
+		}
+	}
+	if got.Labels["anchord.managed-by"] != "f45" {
+		t.Errorf("anchord.managed-by=f45 label missing, got %v", got.Labels)
 	}
 	// Env must include the gateway IP from self.IPsByNetwork[sharedNet].
 	envHas := func(key, val string) bool {
