@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -716,6 +717,76 @@ func TestRun_F45_NoSharedNetYetSkipsCreate(t *testing.T) {
 
 	if c := len(ops.createdSpecs()); c != 0 {
 		t.Errorf("expected no Create call when sharedNet is unknown; got %d", c)
+	}
+
+	cancel()
+	<-done
+}
+
+// Issue #1 followup: the F-44 picker settles asynchronously during
+// the first discovery reconcile. The watcher must read the picker's
+// choice *each time* it needs it — not snapshot a startup-time empty
+// string. We simulate this by handing the watcher a function that
+// returns "" first and "transit" second, and verify the second
+// event-driven create succeeds.
+func TestRun_F45_SharedNetworkLookupIsLazy(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	ops := newFakeOps([]ContainerInfo{target})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+
+	// Picker emulation: returns "" until `settled` flips, then
+	// returns the real net. Mirrors sharednet.Picker.Chosen, which
+	// returns "" until the first reconcile with a real backend.
+	var settled atomic.Bool
+	picker := func() string {
+		if !settled.Load() {
+			return ""
+		}
+		return "transit"
+	}
+
+	w := newWithOps(ops)
+	w.recipe = managedRecipe("ak-outpost-ldap")
+	w.SetSharedNetworkFunc(picker)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// Drain backfill + a first event while the picker is still
+	// unsettled. No Create call must happen.
+	ops.eventCh <- EventMsg{Action: "start", ActorID: target.ID, ActorName: "ak-outpost-ldap"}
+	time.Sleep(80 * time.Millisecond)
+	if c := len(ops.createdSpecs()); c != 0 {
+		t.Fatalf("create must be skipped while picker is unsettled; got %d", c)
+	}
+
+	// Picker settles. The watcher already saw the event(s), so a
+	// fresh event is needed to retry — same shape as production
+	// (event-driven, not poll-driven).
+	settled.Store(true)
+	ops.eventCh <- EventMsg{Action: "start", ActorID: target.ID, ActorName: "ak-outpost-ldap"}
+	time.Sleep(80 * time.Millisecond)
+	specs := ops.createdSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("after picker settles, create must run on the next event; got %d", len(specs))
+	}
+	hasGW := false
+	for _, e := range specs[0].Env {
+		if e == "ANCHORD_GATEWAY_IP=10.0.0.5" {
+			hasGW = true
+			break
+		}
+	}
+	if !hasGW {
+		t.Errorf("ANCHORD_GATEWAY_IP=10.0.0.5 expected (self IP on the picker's net), env=%v", specs[0].Env)
 	}
 
 	cancel()

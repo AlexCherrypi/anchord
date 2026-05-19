@@ -129,11 +129,15 @@ type Watcher struct {
 	// F-43 (start existing Created-state siblings only).
 	recipe config.ManagedSARecipe
 
-	// sharedNet, when non-empty, is the network whose IP we use to
-	// default ManagedSA.GatewayIP. Set by the caller via SetSharedNetwork
-	// once the F-44 picker has settled. May remain empty for
-	// pure-F-43 stacks — they never read it.
-	sharedNet string
+	// sharedNetFn returns the network whose IP we use to default
+	// ManagedSA.GatewayIP. Called lazily on every F-45 createAndStart
+	// so the watcher always sees the F-44 picker's *current* choice,
+	// not a stale startup-time snapshot. Returning "" means "not yet
+	// known" — buildSpec then errors out and the event-driven
+	// watcher will retry on the next sibling-start. May be nil for
+	// pure-F-43 stacks; buildSpec only consults it when GatewayIP
+	// is unset.
+	sharedNetFn func() string
 }
 
 // New constructs a Watcher backed by a live Docker client. recipe
@@ -145,18 +149,36 @@ func New(cli *client.Client, recipe config.ManagedSARecipe) *Watcher {
 	}
 }
 
-// SetSharedNetwork tells the watcher which Docker network to read
-// anchord's own IP from when defaulting ManagedSA.GatewayIP. Called
-// by main.go once the F-44 picker has settled (typically right after
-// the first reconcile observes a backend). Safe to call before Run.
-func (w *Watcher) SetSharedNetwork(name string) { w.sharedNet = name }
+// SetSharedNetworkFunc registers a callback the watcher consults each
+// time it needs the F-44 picker's current choice. main.go wires this
+// to picker.Chosen so the picker can settle on a later reconcile and
+// the watcher picks up the new value the next time a sibling start
+// fires — without needing a notify channel. Safe to call before Run.
+//
+// Passing nil disables the lazy lookup (pure-F-43 mode).
+func (w *Watcher) SetSharedNetworkFunc(fn func() string) { w.sharedNetFn = fn }
+
+// sharedNet returns the picker's current choice, or "" when no
+// callback has been wired or the picker hasn't settled yet.
+func (w *Watcher) sharedNet() string {
+	if w.sharedNetFn == nil {
+		return ""
+	}
+	return w.sharedNetFn()
+}
 
 // newWithOps is the test seam.
 func newWithOps(ops dockerOps) *Watcher { return &Watcher{ops: ops} }
 
-// newWithOpsAndRecipe is the test seam for F-45.
+// newWithOpsAndRecipe is the test seam for F-45. sharedNet is the
+// fixed value the watcher will report as the picker's choice — pass
+// "" to simulate the not-yet-settled state.
 func newWithOpsAndRecipe(ops dockerOps, recipe config.ManagedSARecipe, sharedNet string) *Watcher {
-	return &Watcher{ops: ops, recipe: recipe, sharedNet: sharedNet}
+	w := &Watcher{ops: ops, recipe: recipe}
+	if sharedNet != "" {
+		w.sharedNetFn = func() string { return sharedNet }
+	}
+	return w
 }
 
 // Run does the startup backfill and then streams Docker events,
@@ -353,12 +375,13 @@ func (w *Watcher) buildSpec(self SelfInfo) (CreateSpec, error) {
 	}
 	gatewayIP := w.recipe.GatewayIP
 	if gatewayIP == "" {
-		if w.sharedNet == "" {
+		shared := w.sharedNet()
+		if shared == "" {
 			return CreateSpec{}, fmt.Errorf("ManagedSA.GatewayIP empty and shared-network is not yet known — try again after F-44 picker settles")
 		}
-		gatewayIP = self.IPsByNetwork[w.sharedNet]
+		gatewayIP = self.IPsByNetwork[shared]
 		if gatewayIP == "" {
-			return CreateSpec{}, fmt.Errorf("self has no IP on shared network %q; cannot default GatewayIP", w.sharedNet)
+			return CreateSpec{}, fmt.Errorf("self has no IP on shared network %q; cannot default GatewayIP", shared)
 		}
 	}
 

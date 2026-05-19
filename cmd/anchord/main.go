@@ -257,12 +257,13 @@ func runNetworkAnchor(ctx context.Context) error {
 	if cfg.AutostartSiblings {
 		watcher := autostart.New(cli, cfg.ManagedSA)
 		// F-45 needs the shared network to default ManagedSA.GatewayIP
-		// to anchord's own IP on it. The picker may not have settled
-		// yet, but Candidates() returns a stable list and the first
-		// reconcile typically settles within seconds; we pass the
-		// picker's current Chosen() (may be empty initially) and the
-		// watcher self-recovers on the next event.
-		watcher.SetSharedNetwork(picker.Chosen())
+		// to anchord's own IP on it. The picker settles asynchronously
+		// during the first reconcile that observes a backend, so we
+		// can't snapshot a value here. Hand the watcher picker.Chosen
+		// itself — it's read lazily on every sibling-start event, so
+		// the moment the picker settles the next create resolves
+		// against the fresh value.
+		watcher.SetSharedNetworkFunc(picker.Chosen)
 		if cfg.ManagedSA.Active() {
 			slog.Info("managed service-anchor recipe active",
 				"target", cfg.ManagedSA.Target,
