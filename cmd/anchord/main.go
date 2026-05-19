@@ -255,7 +255,21 @@ func runNetworkAnchor(ctx context.Context) error {
 	//    scope: the spawning service may carry no anchord labels at
 	//    all (authentik outpost case) yet still need the rescue.
 	if cfg.AutostartSiblings {
-		watcher := autostart.New(cli)
+		watcher := autostart.New(cli, cfg.ManagedSA)
+		// F-45 needs the shared network to default ManagedSA.GatewayIP
+		// to anchord's own IP on it. The picker may not have settled
+		// yet, but Candidates() returns a stable list and the first
+		// reconcile typically settles within seconds; we pass the
+		// picker's current Chosen() (may be empty initially) and the
+		// watcher self-recovers on the next event.
+		watcher.SetSharedNetwork(picker.Chosen())
+		if cfg.ManagedSA.Active() {
+			slog.Info("managed service-anchor recipe active",
+				"target", cfg.ManagedSA.Target,
+				"name", cfg.ManagedSA.Name,
+				"image", orDefault(cfg.ManagedSA.Image, "<self>"),
+				"gateway_ip", orDefault(cfg.ManagedSA.GatewayIP, "<self on shared net>"))
+		}
 		go func() {
 			if err := watcher.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
 				slog.Error("autostart watcher exited", "err", err)
@@ -336,6 +350,17 @@ func selfNetworks(ctx context.Context, cli *client.Client) ([]string, error) {
 		names = append(names, name)
 	}
 	return names, nil
+}
+
+// orDefault returns s when non-empty, otherwise def. Tiny helper for
+// log lines where a configured value should be shown verbatim and an
+// empty value should surface a placeholder so the operator can tell
+// "not set" from "set to empty".
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 // buildDiscoveryDiscriminator resolves the F-42 selector-vs-project

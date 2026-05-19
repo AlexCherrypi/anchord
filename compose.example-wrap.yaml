@@ -158,26 +158,40 @@ services:
     restart: unless-stopped
     depends_on: [anchord]
 
-  # ---------- F-43 deferred service-anchor --------------------------------
-  # Pattern for targets that DON'T exist at compose-up time — e.g. an
-  # Authentik outpost container spawned by authentik-worker via the
-  # Docker API after this stack is already up.
+  # ---------- F-43 / F-45 deferred service-anchors ------------------------
   #
-  # `docker create` succeeds; the first `start` fails (no such target);
-  # Docker does NOT auto-retry. The network-anchor above watches Docker
-  # events and starts this container once `ak-outpost-ldap` appears.
-  # `restart: unless-stopped` takes over after the first successful
-  # start, so subsequent target restarts pull the anchor along.
+  # When the target container exists at compose-up time but in
+  # `Created` state (e.g. you put `restart: no` on it, or you use a
+  # custom orchestrator) → F-43 covers it. Just declare the
+  # service-anchor in compose as usual; the network-anchor above
+  # auto-starts it once the target's first `start` event arrives.
   #
-  # Operator-visible cosmetic: this container shows `Created` state in
-  # `docker ps -a` for a few seconds during the first deploy, then
-  # transitions to `Up`. That's not a stuck container.
-  # ldap-outpost-anchor:
-  #   image: ghcr.io/alexcherrypi/anchord:latest
-  #   cap_add: [NET_ADMIN]
-  #   network_mode: "container:ak-outpost-ldap"   # spawned later by authentik
-  #   environment:
-  #     ANCHORD_MODE: service-anchor
-  #     ANCHORD_GATEWAY_IP: 172.30.0.2
-  #   restart: unless-stopped
-  #   depends_on: [anchord]
+  # When the target DOES NOT EXIST at compose-up time (e.g. an
+  # Authentik outpost spawned by authentik-worker via the Docker API
+  # after this stack is already up) → Compose halts because
+  # `docker create --network container:NONEXISTENT` succeeds but the
+  # first `start` fails, and the deploy aborts. There's no Compose-
+  # declared service-anchor for F-43 to start. F-45 fills this gap:
+  # the network-anchor itself owns the recipe and creates the
+  # service-anchor on demand.
+  #
+  # To opt in, add to the network-anchor's environment block above:
+  #
+  #   ANCHORD_MANAGED_SA_TARGET: ak-outpost-ldap
+  #   # everything else has sensible defaults:
+  #   #   _NAME       = "<TARGET>-service-anchor"
+  #   #   _IMAGE      = network-anchor's own image (auto-detected)
+  #   #   _GATEWAY_IP = network-anchor's IP on the shared network
+  #
+  # When the worker spawns ak-outpost-ldap, the network-anchor:
+  #   1. Sees the `container start` event.
+  #   2. Inspects itself for default image + IP.
+  #   3. `docker create` an ak-outpost-ldap-service-anchor container
+  #      with network_mode: "container:ak-outpost-ldap" and
+  #      ANCHORD_GATEWAY_IP set to the resolved IP.
+  #   4. `docker start` it.
+  #   5. The created SA carries `com.docker.compose.project=<this
+  #      stack's project name>` so `docker compose down` cleans it up.
+  #
+  # F-43 still handles Compose-declared siblings; F-45 only kicks in
+  # for targets named by ANCHORD_MANAGED_SA_TARGET.

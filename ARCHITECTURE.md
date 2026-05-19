@@ -185,6 +185,24 @@ Two ingredients make this work:
   `POST /containers/<sibling>/start`. Default on; opt out with
   `ANCHORD_AUTOSTART_SIBLINGS=false`. Requires `POST=1` on the
   docker-socket-proxy.
+- **F-45 managed service-anchor**: Compose halts when it tries to
+  `docker create` a container whose `network_mode: container:<X>` is
+  unresolvable at compose-up — i.e. F-43 never gets a chance to
+  retry because the deploy already failed. F-45 moves the recipe
+  from Compose into the network-anchor itself: set
+  `ANCHORD_MANAGED_SA_TARGET=<X>` and the anchor will **create** the
+  service-anchor (image defaults to its own, gateway-IP defaults to
+  its own IP on the F-44 shared network, plus operator overrides)
+  the first time it sees `<X>` start. Same POST=1 requirement as
+  F-43 — no new permission. Labels the created container with the
+  network-anchor's own `com.docker.compose.project` so
+  `docker compose down` reaps it cleanly.
+- **F-44 shared-network picker**: with multiple transit-named
+  bridges in one stack, anchord picks the network where its
+  configured-selector backends actually live (highest co-attachment
+  count; ties prefer "transit"-named then alphabetical). Stateful —
+  once a backend is observed on the chosen network it locks in, no
+  flapping. `ANCHORD_SHARED_NETWORK` pins explicitly when needed.
 
 The two patterns share the same network-anchor binary and the same
 nftables surface — the differences are purely on the service-anchor

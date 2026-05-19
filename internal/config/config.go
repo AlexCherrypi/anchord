@@ -13,6 +13,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -48,6 +49,47 @@ const (
 	// see at a glance that v6 is RA-driven on this stack.
 	AddressModeSLAACRAOnly AddressMode = "slaac-ra-only"
 )
+
+// ManagedSARecipe is the F-45 recipe for a service-anchor container
+// the network-anchor will create on demand when a matching target
+// appears. Activated by setting ANCHORD_MANAGED_SA_TARGET. All other
+// fields have sensible defaults filled in at startup by the
+// autostart watcher.
+type ManagedSARecipe struct {
+	// Target is the stable name of the container the managed
+	// service-anchor will be bound to via
+	// `network_mode: container:<Target>`. Empty means F-45 is
+	// inactive — only the F-43 start-existing-Created-sibling path
+	// runs.
+	Target string
+
+	// Name is the container name the network-anchor will create.
+	// Default: "<Target>-service-anchor". The default is computed
+	// at load time so cfg.ManagedSA.Name is always non-empty when
+	// cfg.ManagedSA.Target is.
+	Name string
+
+	// Image is the container image. Empty means "use whatever image
+	// the network-anchor itself is running" — resolved at runtime
+	// by inspecting the anchord container against the Docker socket.
+	Image string
+
+	// GatewayIP is the value passed as ANCHORD_GATEWAY_IP into the
+	// created service-anchor. Empty means "use the network-anchor's
+	// own IP on the chosen shared network" — resolved at runtime
+	// once the shared-network picker (F-44) has settled.
+	GatewayIP string
+
+	// ExtraEnv is additional env vars to inject into the created
+	// service-anchor. Parsed from ANCHORD_MANAGED_SA_EXTRA_ENV as a
+	// JSON object {"KEY": "value", …}; empty by default.
+	ExtraEnv map[string]string
+}
+
+// Active reports whether F-45 is in play. False means the autostart
+// watcher behaves exactly as F-43 (start-only on existing Created
+// siblings); true adds the create-then-start code path.
+func (r ManagedSARecipe) Active() bool { return r.Target != "" }
 
 // NetworkAnchor holds resolved settings for the network-anchor mode.
 type NetworkAnchor struct {
@@ -88,6 +130,23 @@ type NetworkAnchor struct {
 	// AddressMode picks how the external IPv4 is obtained (bootstrap
 	// vs dhcp-refresh vs slaac-ra-only). Default "bootstrap".
 	AddressMode AddressMode
+
+	// ManagedSA is the optional F-45 recipe for an anchord-managed
+	// service-anchor. When Target is non-empty, the network-anchor's
+	// event handler not only auto-starts existing Created-state
+	// siblings (F-43) but also CREATES a service-anchor container on
+	// demand when a matching target appears. Used for runtime-spawned
+	// targets like authentik outposts that Docker Compose cannot
+	// declare a `network_mode: container:<X>` peer for (Compose
+	// halts on create-but-cant-start; F-43 alone never gets a
+	// chance to retry because Compose aborts the deploy).
+	//
+	// All fields except Target have defaults: Name defaults to
+	// "<Target>-service-anchor", Image defaults to the network-
+	// anchor's own image (auto-detected at startup), GatewayIP
+	// defaults to anchord's own IP on the chosen shared network
+	// (post-F-44).
+	ManagedSA ManagedSARecipe
 
 	// AutostartSiblings controls whether the network-anchor watches
 	// for `container start` events and starts any sibling container
@@ -209,6 +268,14 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 	}
 	c.AutostartSiblings = autostart
 
+	// F-45 managed service-anchor recipe — opt-in via TARGET. All
+	// other fields default to "fill in at runtime" if unset.
+	managedSA, err := parseManagedSARecipe()
+	if err != nil {
+		return nil, err
+	}
+	c.ManagedSA = managedSA
+
 	if c.ComposeProject == "" && len(c.LabelSelector) == 0 {
 		return nil, fmt.Errorf("ANCHORD_PROJECT (or COMPOSE_PROJECT_NAME) must be set unless ANCHORD_LABEL_SELECTOR is")
 	}
@@ -299,6 +366,61 @@ func parseGatewayIPs(raw string) ([]net.IP, error) {
 			sawV6 = true
 			out = append(out, ip)
 		}
+	}
+	return out, nil
+}
+
+// parseManagedSARecipe loads the F-45 service-anchor recipe from
+// env. Returns the zero value when ANCHORD_MANAGED_SA_TARGET is
+// unset — recipe.Active() returns false and the autostart watcher
+// falls back to pure F-43 behaviour.
+//
+// Defaults filled here (i.e. statically derivable):
+//   - Name = "<Target>-service-anchor"
+//
+// Runtime-resolved defaults (Image, GatewayIP) are left empty here;
+// the autostart watcher fills them by inspecting its own container
+// after the shared-network picker has settled.
+//
+// Validation:
+//   - Empty Target → entire recipe inactive (no error).
+//   - ANCHORD_MANAGED_SA_EXTRA_ENV must be valid JSON (object of
+//     string→string). Anything else is a fatal startup error.
+//   - Operator-specified Image / GatewayIP are not validated here;
+//     Docker / the service-anchor itself will surface failures.
+func parseManagedSARecipe() (ManagedSARecipe, error) {
+	target := strings.TrimSpace(os.Getenv("ANCHORD_MANAGED_SA_TARGET"))
+	if target == "" {
+		return ManagedSARecipe{}, nil
+	}
+	name := strings.TrimSpace(os.Getenv("ANCHORD_MANAGED_SA_NAME"))
+	if name == "" {
+		name = target + "-service-anchor"
+	}
+	extra, err := parseExtraEnvJSON(os.Getenv("ANCHORD_MANAGED_SA_EXTRA_ENV"))
+	if err != nil {
+		return ManagedSARecipe{}, err
+	}
+	return ManagedSARecipe{
+		Target:    target,
+		Name:      name,
+		Image:     strings.TrimSpace(os.Getenv("ANCHORD_MANAGED_SA_IMAGE")),
+		GatewayIP: strings.TrimSpace(os.Getenv("ANCHORD_MANAGED_SA_GATEWAY_IP")),
+		ExtraEnv:  extra,
+	}, nil
+}
+
+// parseExtraEnvJSON decodes a JSON object of string→string into a
+// map. Empty input returns an empty map (not nil) so callers can
+// range over it without a nil check.
+func parseExtraEnvJSON(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("invalid ANCHORD_MANAGED_SA_EXTRA_ENV: must be a JSON object of string->string, got %v", err)
 	}
 	return out, nil
 }

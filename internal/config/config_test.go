@@ -18,6 +18,9 @@ func clearAnchordEnv(t *testing.T) {
 		"ANCHORD_DHCP_HOSTNAME", "ANCHORD_POLL_INTERVAL",
 		"ANCHORD_DHCP_BACKOFF_MAX", "ANCHORD_LOG_LEVEL",
 		"ANCHORD_LABEL_SELECTOR", "ANCHORD_AUTOSTART_SIBLINGS",
+		"ANCHORD_MANAGED_SA_TARGET", "ANCHORD_MANAGED_SA_NAME",
+		"ANCHORD_MANAGED_SA_IMAGE", "ANCHORD_MANAGED_SA_GATEWAY_IP",
+		"ANCHORD_MANAGED_SA_EXTRA_ENV",
 		"COMPOSE_PROJECT_NAME", "DOCKER_HOST",
 	} {
 		t.Setenv(k, "")
@@ -430,6 +433,113 @@ func TestLoad_AutostartSiblings(t *testing.T) {
 				t.Errorf("got %v want %v", cfg.AutostartSiblings, tc.want)
 			}
 		})
+	}
+}
+
+// F-45: unset ANCHORD_MANAGED_SA_TARGET → inactive recipe; F-43-only
+// behaviour at runtime. .Active() reports false.
+func TestLoad_ManagedSA_InactiveByDefault(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ManagedSA.Active() {
+		t.Errorf("expected inactive recipe by default, got %+v", cfg.ManagedSA)
+	}
+}
+
+// F-45: only TARGET set → all other fields filled with statically
+// derivable defaults; Image and GatewayIP stay empty for runtime
+// resolution.
+func TestLoad_ManagedSA_DefaultsFromTarget(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-authentik")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "ak-outpost-ldap")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if !cfg.ManagedSA.Active() {
+		t.Fatal("recipe should be active when TARGET is set")
+	}
+	if cfg.ManagedSA.Target != "ak-outpost-ldap" {
+		t.Errorf("Target: got %q", cfg.ManagedSA.Target)
+	}
+	if cfg.ManagedSA.Name != "ak-outpost-ldap-service-anchor" {
+		t.Errorf("default Name should be <Target>-service-anchor, got %q", cfg.ManagedSA.Name)
+	}
+	if cfg.ManagedSA.Image != "" {
+		t.Errorf("default Image should be empty (resolve at runtime), got %q", cfg.ManagedSA.Image)
+	}
+	if cfg.ManagedSA.GatewayIP != "" {
+		t.Errorf("default GatewayIP should be empty (resolve at runtime), got %q", cfg.ManagedSA.GatewayIP)
+	}
+	if len(cfg.ManagedSA.ExtraEnv) != 0 {
+		t.Errorf("default ExtraEnv should be empty, got %v", cfg.ManagedSA.ExtraEnv)
+	}
+}
+
+// F-45: explicit overrides for all fields are preserved.
+func TestLoad_ManagedSA_AllExplicit(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-authentik")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "ak-outpost-ldap")
+	t.Setenv("ANCHORD_MANAGED_SA_NAME", "custom-sa-name")
+	t.Setenv("ANCHORD_MANAGED_SA_IMAGE", "ghcr.io/example/anchord:v3")
+	t.Setenv("ANCHORD_MANAGED_SA_GATEWAY_IP", "172.31.80.181")
+	t.Setenv("ANCHORD_MANAGED_SA_EXTRA_ENV", `{"FOO":"bar","BAZ":"qux"}`)
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ManagedSA.Name != "custom-sa-name" {
+		t.Errorf("Name override lost: %q", cfg.ManagedSA.Name)
+	}
+	if cfg.ManagedSA.Image != "ghcr.io/example/anchord:v3" {
+		t.Errorf("Image override lost: %q", cfg.ManagedSA.Image)
+	}
+	if cfg.ManagedSA.GatewayIP != "172.31.80.181" {
+		t.Errorf("GatewayIP override lost: %q", cfg.ManagedSA.GatewayIP)
+	}
+	if cfg.ManagedSA.ExtraEnv["FOO"] != "bar" || cfg.ManagedSA.ExtraEnv["BAZ"] != "qux" {
+		t.Errorf("ExtraEnv not parsed correctly: %v", cfg.ManagedSA.ExtraEnv)
+	}
+}
+
+// F-45: malformed EXTRA_ENV JSON is a fatal startup error — silently
+// dropping a typo would hide misconfiguration of a security-relevant
+// env-injection field.
+func TestLoad_ManagedSA_ExtraEnvMalformed(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-authentik")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "tgt")
+	t.Setenv("ANCHORD_MANAGED_SA_EXTRA_ENV", "{this-is: not, valid: json}")
+	_, err := LoadNetworkAnchor()
+	if err == nil {
+		t.Fatal("expected fatal error for malformed EXTRA_ENV JSON")
+	}
+	if !strings.Contains(err.Error(), "ANCHORD_MANAGED_SA_EXTRA_ENV") {
+		t.Errorf("error must mention the env var name, got: %v", err)
+	}
+}
+
+// F-45: empty EXTRA_ENV is valid → empty (non-nil) map.
+func TestLoad_ManagedSA_ExtraEnvEmpty(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-authentik")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "tgt")
+	t.Setenv("ANCHORD_MANAGED_SA_EXTRA_ENV", "")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ManagedSA.ExtraEnv == nil {
+		t.Error("ExtraEnv should never be nil — caller ranges over it")
+	}
+	if len(cfg.ManagedSA.ExtraEnv) != 0 {
+		t.Errorf("empty input should yield empty map, got %v", cfg.ManagedSA.ExtraEnv)
 	}
 }
 

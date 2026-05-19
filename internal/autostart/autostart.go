@@ -33,8 +33,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/AlexCherrypi/anchord/internal/config"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -61,6 +65,29 @@ type EventMsg struct {
 	ActorName string
 }
 
+// CreateSpec is the minimal payload Watcher needs to create an
+// F-45-managed service-anchor container. Production dockerAdapter
+// translates this into the SDK's container.Config / HostConfig.
+// Tests construct it directly and assert against it.
+type CreateSpec struct {
+	Name        string
+	Image       string
+	Env         []string          // "K=V" pairs in deterministic order
+	Labels      map[string]string // includes com.docker.compose.project + anchord.managed-by
+	NetworkMode string            // "container:<Target>"
+	CapAdd      []string          // typically ["NET_ADMIN"]
+	Restart     string            // "unless-stopped"
+}
+
+// SelfInfo is what Watcher.Run can learn about its own container
+// once at startup — used to fill F-45 defaults (image, IP on shared
+// network) when the operator hasn't supplied them.
+type SelfInfo struct {
+	Image            string            // anchord's own image, used as default for ManagedSA.Image
+	IPsByNetwork     map[string]string // network name -> IP (used to default GatewayIP)
+	ComposeProject   string            // copied into the managed SA's labels for clean teardown
+}
+
 // dockerOps is the slice of Docker surface this package uses. Kept
 // narrow so unit tests don't drag the SDK in.
 type dockerOps interface {
@@ -74,6 +101,17 @@ type dockerOps interface {
 	// so callers don't need to deduplicate.
 	Start(ctx context.Context, id string) error
 
+	// Create issues a docker container.create call from the given
+	// recipe and returns the new container ID. F-45 calls Create
+	// followed by Start; idempotency on duplicate names is handled
+	// at the call site by inspecting first.
+	Create(ctx context.Context, spec CreateSpec) (string, error)
+
+	// InspectSelf returns minimal info about the anchord container
+	// itself — used to default F-45 fields. Called once at Watcher
+	// startup (if the recipe is active).
+	InspectSelf(ctx context.Context) (SelfInfo, error)
+
 	// Events subscribes to Docker container.start events. The
 	// returned channels mirror docker SDK semantics: msgs delivers
 	// events, errs delivers terminal errors (caller is expected to
@@ -81,18 +119,45 @@ type dockerOps interface {
 	Events(ctx context.Context) (<-chan EventMsg, <-chan error)
 }
 
-// Watcher is the live F-43 worker. One instance per network-anchor.
+// Watcher is the live F-43 / F-45 worker. One instance per
+// network-anchor.
 type Watcher struct {
 	ops dockerOps
+
+	// recipe is the optional F-45 managed-service-anchor recipe.
+	// When recipe.Active() is false the watcher behaves as pure
+	// F-43 (start existing Created-state siblings only).
+	recipe config.ManagedSARecipe
+
+	// sharedNet, when non-empty, is the network whose IP we use to
+	// default ManagedSA.GatewayIP. Set by the caller via SetSharedNetwork
+	// once the F-44 picker has settled. May remain empty for
+	// pure-F-43 stacks — they never read it.
+	sharedNet string
 }
 
-// New constructs a Watcher backed by a live Docker client.
-func New(cli *client.Client) *Watcher {
-	return &Watcher{ops: dockerAdapter{cli: cli}}
+// New constructs a Watcher backed by a live Docker client. recipe
+// activates F-45 when recipe.Active() is true.
+func New(cli *client.Client, recipe config.ManagedSARecipe) *Watcher {
+	return &Watcher{
+		ops:    dockerAdapter{cli: cli},
+		recipe: recipe,
+	}
 }
+
+// SetSharedNetwork tells the watcher which Docker network to read
+// anchord's own IP from when defaulting ManagedSA.GatewayIP. Called
+// by main.go once the F-44 picker has settled (typically right after
+// the first reconcile observes a backend). Safe to call before Run.
+func (w *Watcher) SetSharedNetwork(name string) { w.sharedNet = name }
 
 // newWithOps is the test seam.
 func newWithOps(ops dockerOps) *Watcher { return &Watcher{ops: ops} }
+
+// newWithOpsAndRecipe is the test seam for F-45.
+func newWithOpsAndRecipe(ops dockerOps, recipe config.ManagedSARecipe, sharedNet string) *Watcher {
+	return &Watcher{ops: ops, recipe: recipe, sharedNet: sharedNet}
+}
 
 // Run does the startup backfill and then streams Docker events,
 // reacting to each `container start` by attempting to start any
@@ -152,7 +217,8 @@ func (w *Watcher) consume(ctx context.Context, msgs <-chan EventMsg, errs <-chan
 // before the watcher came up — e.g. anchord restart while the cluster
 // was mid-deploy. Lists every container, finds the running ones, and
 // kicks start on any Created-state sibling whose NetworkMode resolves
-// to one of them.
+// to one of them. With an active F-45 recipe also runs the
+// create-then-start path against the configured target.
 func (w *Watcher) backfill(ctx context.Context) {
 	all, err := w.ops.List(ctx)
 	if err != nil {
@@ -166,11 +232,13 @@ func (w *Watcher) backfill(ctx context.Context) {
 		for _, sib := range matchSiblings(all, t) {
 			w.start(ctx, sib, t, "backfill")
 		}
+		w.maybeManage(ctx, all, t, "backfill")
 	}
 }
 
 // handleTargetStart is the per-event entry: a target just started,
-// re-scan and trigger any matching Created siblings.
+// re-scan and trigger any matching Created siblings, and run the
+// F-45 create-then-start path if the recipe applies.
 func (w *Watcher) handleTargetStart(ctx context.Context, target ContainerInfo) {
 	all, err := w.ops.List(ctx)
 	if err != nil {
@@ -180,6 +248,183 @@ func (w *Watcher) handleTargetStart(ctx context.Context, target ContainerInfo) {
 	for _, sib := range matchSiblings(all, target) {
 		w.start(ctx, sib, target, "event")
 	}
+	w.maybeManage(ctx, all, target, "event")
+}
+
+// maybeManage is the F-45 create-then-start dispatcher.
+//
+// Pre-conditions: recipe must be Active() and the just-started
+// `target` must reference the recipe's configured Target (by name or
+// ID). Otherwise this is a no-op.
+//
+// Resolution order on a match:
+//   - If the managed service-anchor already exists AND is running →
+//     debug log, nothing to do.
+//   - If it exists in Created state → existing F-43 start path will
+//     have handled it via matchSiblings above; we skip the second
+//     create (idempotent guard).
+//   - If it doesn't exist → resolve runtime defaults
+//     (image=self.Image, gateway_ip=self IP on sharedNet), build the
+//     CreateSpec, call ops.Create then ops.Start.
+//
+// All failures are logged at warn-level and the watcher keeps
+// running. F-45 is a quality-of-life feature; surfacing its
+// problems to the operator without killing the data plane is the
+// right tradeoff.
+func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target ContainerInfo, source string) {
+	if !w.recipe.Active() {
+		return
+	}
+	if !targetMatchesRecipe(target, w.recipe.Target) {
+		return
+	}
+
+	// Find the managed SA in the current list.
+	var existing *ContainerInfo
+	for i := range all {
+		if hasName(all[i], w.recipe.Name) {
+			existing = &all[i]
+			break
+		}
+	}
+	if existing != nil {
+		switch strings.ToLower(existing.State) {
+		case "running":
+			slog.Debug("managed service-anchor already running",
+				"name", w.recipe.Name, "target", w.recipe.Target)
+			return
+		case "created":
+			// The F-43 path above already issued Start on this sibling
+			// (matchSiblings will have found it). No need to repeat —
+			// duplicate Start is harmless but adds log noise.
+			return
+		default:
+			// Exited / restarting / paused → try a Start; Docker is
+			// idempotent and best-equipped to handle these states.
+			w.start(ctx, existing.ID, target, "managed/"+source)
+			return
+		}
+	}
+
+	// F-45 NEW path: create from recipe then start.
+	w.createAndStartManaged(ctx, target, source)
+}
+
+// createAndStartManaged inspects self for default values, assembles
+// the CreateSpec, calls Create + Start.
+func (w *Watcher) createAndStartManaged(ctx context.Context, target ContainerInfo, source string) {
+	self, err := w.ops.InspectSelf(ctx)
+	if err != nil {
+		slog.Warn("F-45 self-inspect failed; cannot manage service-anchor",
+			"name", w.recipe.Name, "err", err)
+		return
+	}
+	spec, err := w.buildSpec(self)
+	if err != nil {
+		slog.Warn("F-45 recipe could not be resolved",
+			"name", w.recipe.Name, "err", err)
+		return
+	}
+	id, err := w.ops.Create(ctx, spec)
+	if err != nil {
+		slog.Warn("F-45 create failed",
+			"name", spec.Name, "target", w.recipe.Target, "err", err)
+		return
+	}
+	if err := w.ops.Start(ctx, id); err != nil {
+		slog.Warn("F-45 created but start failed",
+			"name", spec.Name, "id", id, "err", err)
+		return
+	}
+	slog.Info("created and started managed service-anchor",
+		"name", spec.Name, "id", id, "target", w.recipe.Target, "source", source)
+}
+
+// buildSpec turns the recipe (plus runtime self-info) into the
+// concrete CreateSpec. Operator-supplied values win over defaults
+// from self.
+func (w *Watcher) buildSpec(self SelfInfo) (CreateSpec, error) {
+	image := w.recipe.Image
+	if image == "" {
+		image = self.Image
+	}
+	if image == "" {
+		return CreateSpec{}, fmt.Errorf("no image configured and self-inspect returned no image")
+	}
+	gatewayIP := w.recipe.GatewayIP
+	if gatewayIP == "" {
+		if w.sharedNet == "" {
+			return CreateSpec{}, fmt.Errorf("ManagedSA.GatewayIP empty and shared-network is not yet known — try again after F-44 picker settles")
+		}
+		gatewayIP = self.IPsByNetwork[w.sharedNet]
+		if gatewayIP == "" {
+			return CreateSpec{}, fmt.Errorf("self has no IP on shared network %q; cannot default GatewayIP", w.sharedNet)
+		}
+	}
+
+	// Assemble env in deterministic order so log lines, tests, and
+	// recreated containers are reproducible across restarts.
+	envMap := map[string]string{
+		"ANCHORD_MODE":       "service-anchor",
+		"ANCHORD_GATEWAY_IP": gatewayIP,
+		"ANCHORD_LOG_LEVEL":  "info",
+	}
+	for k, v := range w.recipe.ExtraEnv {
+		envMap[k] = v
+	}
+	keys := make([]string, 0, len(envMap))
+	for k := range envMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	env := make([]string, 0, len(keys))
+	for _, k := range keys {
+		env = append(env, k+"="+envMap[k])
+	}
+
+	labels := map[string]string{
+		"anchord.managed-by": "f45",
+	}
+	if self.ComposeProject != "" {
+		// Tag with the network-anchor's compose project so
+		// `docker compose down` of the wrap stack also removes the
+		// managed service-anchor — no operator-visible leftover.
+		labels["com.docker.compose.project"] = self.ComposeProject
+	}
+
+	return CreateSpec{
+		Name:        w.recipe.Name,
+		Image:       image,
+		Env:         env,
+		Labels:      labels,
+		NetworkMode: "container:" + w.recipe.Target,
+		CapAdd:      []string{"NET_ADMIN"},
+		Restart:     "unless-stopped",
+	}, nil
+}
+
+// targetMatchesRecipe is true if the started container matches the
+// recipe's Target field — by container name or by ID (long or
+// short). Same form Docker accepts in network_mode: container:<X>.
+func targetMatchesRecipe(target ContainerInfo, recipeTarget string) bool {
+	if recipeTarget == "" {
+		return false
+	}
+	refs := referencesFor(target)
+	_, ok := refs[strings.TrimPrefix(recipeTarget, "/")]
+	return ok
+}
+
+// hasName reports whether a container's Names list contains the
+// supplied name (with or without the Docker "/" prefix).
+func hasName(c ContainerInfo, name string) bool {
+	target := strings.TrimPrefix(name, "/")
+	for _, n := range c.Names {
+		if strings.TrimPrefix(n, "/") == target {
+			return true
+		}
+	}
+	return false
 }
 
 // start issues the Docker start API call and logs the result. Failure
@@ -280,6 +525,59 @@ func (a dockerAdapter) List(ctx context.Context) ([]ContainerInfo, error) {
 
 func (a dockerAdapter) Start(ctx context.Context, id string) error {
 	return a.cli.ContainerStart(ctx, id, container.StartOptions{})
+}
+
+func (a dockerAdapter) Create(ctx context.Context, spec CreateSpec) (string, error) {
+	cfg := &container.Config{
+		Image:  spec.Image,
+		Env:    spec.Env,
+		Labels: spec.Labels,
+	}
+	hostCfg := &container.HostConfig{
+		NetworkMode: container.NetworkMode(spec.NetworkMode),
+		CapAdd:      spec.CapAdd,
+		RestartPolicy: container.RestartPolicy{
+			Name: container.RestartPolicyMode(spec.Restart),
+		},
+	}
+	resp, err := a.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, spec.Name)
+	if err != nil {
+		return "", fmt.Errorf("ContainerCreate: %w", err)
+	}
+	return resp.ID, nil
+}
+
+func (a dockerAdapter) InspectSelf(ctx context.Context) (SelfInfo, error) {
+	insp, err := a.cli.ContainerInspect(ctx, selfHostname())
+	if err != nil {
+		return SelfInfo{}, fmt.Errorf("inspect self: %w", err)
+	}
+	out := SelfInfo{
+		Image:        insp.Config.Image,
+		IPsByNetwork: map[string]string{},
+	}
+	if insp.Config != nil && insp.Config.Labels != nil {
+		out.ComposeProject = insp.Config.Labels["com.docker.compose.project"]
+	}
+	if insp.NetworkSettings != nil {
+		for name, n := range insp.NetworkSettings.Networks {
+			if n != nil && n.IPAddress != "" {
+				out.IPsByNetwork[name] = n.IPAddress
+			}
+		}
+	}
+	return out, nil
+}
+
+// selfHostname returns the container ID short form Docker sets as
+// HOSTNAME — the identifier ContainerInspect accepts as a stand-in
+// for the container itself. Errors fall back to empty string, which
+// ContainerInspect will reject with a clear message.
+func selfHostname() string {
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
 }
 
 func (a dockerAdapter) Events(ctx context.Context) (<-chan EventMsg, <-chan error) {
