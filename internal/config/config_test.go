@@ -17,6 +17,7 @@ func clearAnchordEnv(t *testing.T) {
 		"ANCHORD_ADDRESS_MODE", "ANCHORD_DHCP_HOSTNAME",
 		"ANCHORD_POLL_INTERVAL", "ANCHORD_DHCP_BACKOFF_MAX",
 		"ANCHORD_LOG_LEVEL", "ANCHORD_LABEL_SELECTOR",
+		"ANCHORD_AUTOSTART_SIBLINGS",
 		"COMPOSE_PROJECT_NAME", "DOCKER_HOST",
 	} {
 		t.Setenv(k, "")
@@ -360,6 +361,82 @@ func TestLoad_LegacyProjectOnly(t *testing.T) {
 	}
 	if cfg.ComposeProject != "mailcow" {
 		t.Errorf("ComposeProject lost: %q", cfg.ComposeProject)
+	}
+}
+
+// F-43: AutostartSiblings defaults to true so the auto-rescue happens
+// without operator opt-in. Explicit "false" disables. Garbage is fatal.
+func TestLoad_AutostartSiblings(t *testing.T) {
+	cases := []struct {
+		name      string
+		val       string
+		want      bool
+		wantErr   bool
+	}{
+		{"unset → default true", "", true, false},
+		{"explicit true", "true", true, false},
+		{"explicit false", "false", false, false},
+		{"shorthand 1", "1", true, false},
+		{"shorthand 0", "0", false, false},
+		{"TRUE", "TRUE", true, false},
+		{"FALSE", "FALSE", false, false},
+		{"garbage rejected", "yes-please", false, true},
+		{"empty-string treated as default", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAnchordEnv(t)
+			t.Setenv("ANCHORD_PROJECT", "mailcow")
+			t.Setenv("ANCHORD_AUTOSTART_SIBLINGS", tc.val)
+			cfg, err := LoadNetworkAnchor()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for value %q", tc.val)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if cfg.AutostartSiblings != tc.want {
+				t.Errorf("got %v want %v", cfg.AutostartSiblings, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseBoolDefault(t *testing.T) {
+	cases := []struct {
+		name    string
+		val     string
+		def     bool
+		want    bool
+		wantErr bool
+	}{
+		{"unset returns default true", "", true, true, false},
+		{"unset returns default false", "", false, false, false},
+		{"whitespace-only treated as unset", "   ", true, true, false},
+		{"explicit true overrides default false", "true", false, true, false},
+		{"explicit false overrides default true", "false", true, false, false},
+		{"invalid yields error", "maybe", true, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("X_TEST_BOOL", tc.val)
+			got, err := parseBoolDefault("X_TEST_BOOL", tc.def)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %v want %v", got, tc.want)
+			}
+		})
 	}
 }
 

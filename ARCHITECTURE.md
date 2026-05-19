@@ -175,6 +175,16 @@ Two ingredients make this work:
   service. The operator pins the network-anchor's IP on the shared
   wrap_transit bridge and points service-anchors at that IP — no
   DNS, no re-resolution, no cross-project name gymnastics.
+- **F-43 sibling auto-start**: a target container declared via
+  `network_mode: container:<X>` may not yet exist at compose-up time
+  if `<X>` is spawned at runtime (e.g. authentik outposts via the
+  Docker API). Docker accepts `docker create` but rejects start; its
+  `restart: always` policy does NOT auto-retry the initial failure.
+  The network-anchor watches Docker events for any `container start`
+  and rescues sibling containers stuck in `Created` state by issuing
+  `POST /containers/<sibling>/start`. Default on; opt out with
+  `ANCHORD_AUTOSTART_SIBLINGS=false`. Requires `POST=1` on the
+  docker-socket-proxy.
 
 The two patterns share the same network-anchor binary and the same
 nftables surface — the differences are purely on the service-anchor

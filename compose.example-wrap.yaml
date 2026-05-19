@@ -105,6 +105,15 @@ services:
       EVENTS: 1
       INFO: 1
       NETWORKS: 1
+      # POST=1 is required for F-43 sibling auto-start. anchord
+      # invokes POST /containers/<id>/start to rescue service-anchors
+      # whose target wasn't running at compose-up time. The proxy is
+      # only reachable from this project's wrap_transit network, so
+      # the only client that can use the POST surface is the
+      # network-anchor itself. If you set ANCHORD_AUTOSTART_SIBLINGS
+      # to "false" you can leave POST=0 — but then service-anchors
+      # for runtime-spawned targets stay in Created state forever.
+      POST: 1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [wrap_transit]
@@ -148,3 +157,27 @@ services:
       ANCHORD_GATEWAY_IP: 172.30.0.2
     restart: unless-stopped
     depends_on: [anchord]
+
+  # ---------- F-43 deferred service-anchor --------------------------------
+  # Pattern for targets that DON'T exist at compose-up time — e.g. an
+  # Authentik outpost container spawned by authentik-worker via the
+  # Docker API after this stack is already up.
+  #
+  # `docker create` succeeds; the first `start` fails (no such target);
+  # Docker does NOT auto-retry. The network-anchor above watches Docker
+  # events and starts this container once `ak-outpost-ldap` appears.
+  # `restart: unless-stopped` takes over after the first successful
+  # start, so subsequent target restarts pull the anchor along.
+  #
+  # Operator-visible cosmetic: this container shows `Created` state in
+  # `docker ps -a` for a few seconds during the first deploy, then
+  # transitions to `Up`. That's not a stuck container.
+  # ldap-outpost-anchor:
+  #   image: ghcr.io/alexcherrypi/anchord:latest
+  #   cap_add: [NET_ADMIN]
+  #   network_mode: "container:ak-outpost-ldap"   # spawned later by authentik
+  #   environment:
+  #     ANCHORD_MODE: service-anchor
+  #     ANCHORD_GATEWAY_IP: 172.30.0.2
+  #   restart: unless-stopped
+  #   depends_on: [anchord]

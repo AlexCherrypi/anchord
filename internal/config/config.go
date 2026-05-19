@@ -77,6 +77,22 @@ type NetworkAnchor struct {
 	// vs dhcp-refresh vs slaac-ra-only). Default "bootstrap".
 	AddressMode AddressMode
 
+	// AutostartSiblings controls whether the network-anchor watches
+	// for `container start` events and starts any sibling container
+	// in `Created` state whose `network_mode: container:<X>` matches
+	// the just-started target (SPEC F-43). Default true.
+	//
+	// Use case: service-anchors in wrap-mode with a target container
+	// that is spawned at runtime (e.g. authentik outposts via the
+	// Docker API). Docker accepts `docker create --network
+	// container:NONEXISTENT` but rejects start until the target
+	// exists, and does NOT auto-retry. Setting this to true lets the
+	// network-anchor be the auto-retrier.
+	//
+	// Requires `POST=1` on docker-socket-proxy (or equivalent
+	// write-side socket access).
+	AutostartSiblings bool
+
 	// LabelSelector is the operator-defined set of labels a container
 	// must carry (AND-joined) to be considered a backend candidate.
 	// When non-empty it REPLACES the legacy project-label filter
@@ -171,6 +187,14 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 		return nil, err
 	}
 	c.LabelSelector = selector
+
+	// F-43 sibling auto-start: default on. Operator opts out
+	// explicitly via "false"/"0"/"no".
+	autostart, err := parseBoolDefault("ANCHORD_AUTOSTART_SIBLINGS", true)
+	if err != nil {
+		return nil, err
+	}
+	c.AutostartSiblings = autostart
 
 	if c.ComposeProject == "" && len(c.LabelSelector) == 0 {
 		return nil, fmt.Errorf("ANCHORD_PROJECT (or COMPOSE_PROJECT_NAME) must be set unless ANCHORD_LABEL_SELECTOR is")
@@ -307,6 +331,23 @@ func parseLabelSelector(raw string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// parseBoolDefault reads an env var with strconv.ParseBool semantics
+// (accepts 1/0, t/f, true/false, TRUE/FALSE, etc.), falling back to
+// `def` when the env var is unset or empty-string. Malformed values
+// are rejected — silently defaulting on typos would mask
+// misconfiguration of a security-relevant feature flag.
+func parseBoolDefault(key string, def bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s=%q: must be true/false (or 1/0)", key, raw)
+	}
+	return v, nil
 }
 
 // firstSelectorValue returns one selector value, deterministically

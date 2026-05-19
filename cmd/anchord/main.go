@@ -28,6 +28,7 @@ import (
 
 	"net/http"
 
+	"github.com/AlexCherrypi/anchord/internal/autostart"
 	"github.com/AlexCherrypi/anchord/internal/config"
 	"github.com/AlexCherrypi/anchord/internal/dhcp"
 	"github.com/AlexCherrypi/anchord/internal/discovery"
@@ -237,7 +238,27 @@ func runNetworkAnchor(ctx context.Context) error {
 		}
 	}()
 
-	// 6. Reconciler — the main loop.
+	// 6. Sibling auto-start (F-43) — opt-out via ANCHORD_AUTOSTART_SIBLINGS=false.
+	//    Watches Docker for `container start` events and bootstraps
+	//    any Created-state sibling whose network_mode: container:<X>
+	//    matches the just-started target. Independent of selector
+	//    scope: the spawning service may carry no anchord labels at
+	//    all (authentik outpost case) yet still need the rescue.
+	if cfg.AutostartSiblings {
+		watcher := autostart.New(cli)
+		go func() {
+			if err := watcher.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
+				slog.Error("autostart watcher exited", "err", err)
+				// Auto-start is a quality-of-life feature; its loss
+				// doesn't justify killing the network-anchor. Log and
+				// let the rest of the data plane keep working.
+			}
+		}()
+	} else {
+		slog.Info("sibling auto-start disabled (ANCHORD_AUTOSTART_SIBLINGS=false)")
+	}
+
+	// 7. Reconciler — the main loop.
 	rec := reconciler.New(natMgr)
 	rec.OnReconciled = tracker.MarkReconciled
 	return rec.Run(cancelCtx, disc.Updates())
