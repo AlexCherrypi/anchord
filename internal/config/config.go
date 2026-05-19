@@ -84,6 +84,22 @@ type ManagedSARecipe struct {
 	// service-anchor. Parsed from ANCHORD_MANAGED_SA_EXTRA_ENV as a
 	// JSON object {"KEY": "value", …}; empty by default.
 	ExtraEnv map[string]string
+
+	// Labels are extra container labels to stamp onto the created
+	// service-anchor. Parsed from ANCHORD_MANAGED_SA_LABELS as a JSON
+	// object {"key": "value", …}; empty by default.
+	//
+	// Use case (issue #3): operators using ANCHORD_LABEL_SELECTOR
+	// (F-42) need to mark the spawned service-anchor with the same
+	// selector labels (anchord.identity, anchord.expose, …) so the
+	// network-anchor's own discovery filter matches it. Without this,
+	// the wrap-pattern is unusable in selector mode.
+	//
+	// Disallowed keys (fatal at load): com.docker.compose.* (per
+	// issue #2 — anchord-managed containers are out-of-band w.r.t.
+	// compose) and anchord.managed-by (reserved for the built-in
+	// bookkeeping value). All other keys are passed through.
+	Labels map[string]string
 }
 
 // Active reports whether F-45 is in play. False means the autostart
@@ -397,9 +413,21 @@ func parseManagedSARecipe() (ManagedSARecipe, error) {
 	if name == "" {
 		name = target + "-service-anchor"
 	}
-	extra, err := parseExtraEnvJSON(os.Getenv("ANCHORD_MANAGED_SA_EXTRA_ENV"))
+	extra, err := parseJSONStringMap(os.Getenv("ANCHORD_MANAGED_SA_EXTRA_ENV"), "ANCHORD_MANAGED_SA_EXTRA_ENV")
 	if err != nil {
 		return ManagedSARecipe{}, err
+	}
+	labels, err := parseJSONStringMap(os.Getenv("ANCHORD_MANAGED_SA_LABELS"), "ANCHORD_MANAGED_SA_LABELS")
+	if err != nil {
+		return ManagedSARecipe{}, err
+	}
+	for k := range labels {
+		if strings.HasPrefix(k, "com.docker.compose.") {
+			return ManagedSARecipe{}, fmt.Errorf("ANCHORD_MANAGED_SA_LABELS: %q is reserved (compose.* labels stamped without compose.service crash orchestrators — see issue #2)", k)
+		}
+		if k == "anchord.managed-by" {
+			return ManagedSARecipe{}, fmt.Errorf("ANCHORD_MANAGED_SA_LABELS: %q is reserved (built-in bookkeeping label)", k)
+		}
 	}
 	return ManagedSARecipe{
 		Target:    target,
@@ -407,20 +435,22 @@ func parseManagedSARecipe() (ManagedSARecipe, error) {
 		Image:     strings.TrimSpace(os.Getenv("ANCHORD_MANAGED_SA_IMAGE")),
 		GatewayIP: strings.TrimSpace(os.Getenv("ANCHORD_MANAGED_SA_GATEWAY_IP")),
 		ExtraEnv:  extra,
+		Labels:    labels,
 	}, nil
 }
 
-// parseExtraEnvJSON decodes a JSON object of string→string into a
+// parseJSONStringMap decodes a JSON object of string→string into a
 // map. Empty input returns an empty map (not nil) so callers can
-// range over it without a nil check.
-func parseExtraEnvJSON(raw string) (map[string]string, error) {
+// range over it without a nil check. envName is used in error
+// messages so the operator knows which variable they fat-fingered.
+func parseJSONStringMap(raw, envName string) (map[string]string, error) {
 	out := map[string]string{}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return out, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil, fmt.Errorf("invalid ANCHORD_MANAGED_SA_EXTRA_ENV: must be a JSON object of string->string, got %v", err)
+		return nil, fmt.Errorf("invalid %s: must be a JSON object of string->string, got %v", envName, err)
 	}
 	return out, nil
 }

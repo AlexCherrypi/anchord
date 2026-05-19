@@ -404,16 +404,17 @@ func (w *Watcher) buildSpec(self SelfInfo) (CreateSpec, error) {
 		env = append(env, k+"="+envMap[k])
 	}
 
-	// Deliberately NO com.docker.compose.* labels (issue #2). F-45
-	// containers are out-of-band w.r.t. compose — anchord owns their
-	// lifecycle. Stamping `com.docker.compose.project` without
-	// `.service` puts the container in a half-claimed limbo that
-	// crashes Compose-aware orchestrators (TrueNAS app.stop trips on
-	// a raw KeyError for the missing .service key). Anchord's own
-	// `anchord.managed-by=f45` label is enough for bookkeeping.
-	labels := map[string]string{
-		"anchord.managed-by": "f45",
+	// Merge operator-supplied labels (issue #3 — F-42 selector users
+	// need anchord.identity / anchord.expose on the spawn) with the
+	// built-in `anchord.managed-by=f45` last so the built-in always
+	// wins. config.parseManagedSARecipe rejects `com.docker.compose.*`
+	// and `anchord.managed-by` keys at load (see issue #2 for why
+	// compose.* is off-limits).
+	labels := map[string]string{}
+	for k, v := range w.recipe.Labels {
+		labels[k] = v
 	}
+	labels["anchord.managed-by"] = "f45"
 
 	return CreateSpec{
 		Name:        w.recipe.Name,

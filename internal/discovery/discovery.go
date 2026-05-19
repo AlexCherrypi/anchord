@@ -229,7 +229,9 @@ func (d *Discoverer) snapshot(ctx context.Context) error {
 		if spec == nil {
 			continue
 		}
-		ipv4, ipv6 := pickIPs(c, shared)
+		ipv4, ipv6 := resolveSharedNetIPs(c, shared, func(ref string) *container.NetworkSettingsSummary {
+			return inspectNetworkSettings(ctx, d.cli, ref)
+		})
 		if ipv4 == nil && ipv6 == nil {
 			slog.Warn("no usable IP for container",
 				"container", trimName(c.Names),
@@ -302,16 +304,20 @@ func countBackendsPerNetwork(list []container.Summary) map[string]int {
 // pickIPs selects the v4/v6 addresses from the shared network. If
 // sharedNetwork is empty, picks the first non-empty entry.
 func pickIPs(c container.Summary, sharedNetwork string) (net.IP, net.IP) {
-	if c.NetworkSettings == nil {
+	return pickIPsFromSettings(c.NetworkSettings, sharedNetwork)
+}
+
+func pickIPsFromSettings(ns *container.NetworkSettingsSummary, sharedNetwork string) (net.IP, net.IP) {
+	if ns == nil {
 		return nil, nil
 	}
 	if sharedNetwork != "" {
-		if n, ok := c.NetworkSettings.Networks[sharedNetwork]; ok && n != nil {
+		if n, ok := ns.Networks[sharedNetwork]; ok && n != nil {
 			return parseIP(n.IPAddress), parseIP(n.GlobalIPv6Address)
 		}
 		return nil, nil
 	}
-	for _, n := range c.NetworkSettings.Networks {
+	for _, n := range ns.Networks {
 		if n == nil {
 			continue
 		}
@@ -320,6 +326,48 @@ func pickIPs(c container.Summary, sharedNetwork string) (net.IP, net.IP) {
 		}
 	}
 	return nil, nil
+}
+
+// resolveSharedNetIPs resolves a backend's v4/v6 on sharedNetwork.
+// When the backend itself has no Networks entries because it shares
+// a netns via `network_mode: container:<X>` (issue #3 — the wrap
+// pattern needed by F-45 + F-42 stacks), follows the reference via
+// inspectNS and reads the target's network settings instead.
+//
+// inspectNS may return nil if the target is gone or the inspect
+// failed — in that case both return values are nil and discovery
+// logs "no usable IP for container" as usual.
+func resolveSharedNetIPs(c container.Summary, sharedNetwork string, inspectNS func(ref string) *container.NetworkSettingsSummary) (net.IP, net.IP) {
+	if v4, v6 := pickIPsFromSettings(c.NetworkSettings, sharedNetwork); v4 != nil || v6 != nil {
+		return v4, v6
+	}
+	if inspectNS == nil {
+		return nil, nil
+	}
+	ref, ok := strings.CutPrefix(c.HostConfig.NetworkMode, "container:")
+	if !ok {
+		return nil, nil
+	}
+	return pickIPsFromSettings(inspectNS(strings.TrimSpace(ref)), sharedNetwork)
+}
+
+// inspectNetworkSettings is the production-side closure body used by
+// snapshot to follow `network_mode: container:<X>` references. Kept
+// as a free function so resolveSharedNetIPs stays pure and unit-
+// testable via an injected lookup.
+func inspectNetworkSettings(ctx context.Context, cli *client.Client, ref string) *container.NetworkSettingsSummary {
+	if cli == nil || ref == "" {
+		return nil
+	}
+	insp, err := cli.ContainerInspect(ctx, ref)
+	if err != nil {
+		slog.Debug("wrap-target inspect failed", "ref", ref, "err", err)
+		return nil
+	}
+	if insp.NetworkSettings == nil {
+		return nil
+	}
+	return &container.NetworkSettingsSummary{Networks: insp.NetworkSettings.Networks}
 }
 
 func parseIP(s string) net.IP {

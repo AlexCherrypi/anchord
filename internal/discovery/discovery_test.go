@@ -297,6 +297,81 @@ func TestPickIPs_V4Only(t *testing.T) {
 	}
 }
 
+// Issue #3 / Bug B: a container in `network_mode: container:<X>` has
+// no Networks entries of its own — discovery must follow the
+// reference to the target and read X's network settings.
+func TestResolveSharedNetIPs_FollowsContainerNetworkMode(t *testing.T) {
+	// Wrap container itself: no own Networks entries, NetworkMode
+	// points at the target. Mirrors the F-45 + F-42 wrap pattern.
+	wrap := container.Summary{
+		HostConfig: struct {
+			NetworkMode string `json:",omitempty"`
+			Annotations map[string]string `json:",omitempty"`
+		}{NetworkMode: "container:nextcloud-aio-talk"},
+		NetworkSettings: &container.NetworkSettingsSummary{
+			Networks: map[string]*network.EndpointSettings{}, // empty
+		},
+	}
+	target := &container.NetworkSettingsSummary{
+		Networks: map[string]*network.EndpointSettings{
+			"nextcloud-aio": {IPAddress: "172.16.1.4", GlobalIPv6Address: "fd16:1::4"},
+		},
+	}
+	inspectNS := func(ref string) *container.NetworkSettingsSummary {
+		if ref != "nextcloud-aio-talk" {
+			t.Fatalf("unexpected ref: %q (want nextcloud-aio-talk)", ref)
+		}
+		return target
+	}
+
+	v4, v6 := resolveSharedNetIPs(wrap, "nextcloud-aio", inspectNS)
+	if !v4.Equal(net.ParseIP("172.16.1.4")) {
+		t.Errorf("v4: got %s want 172.16.1.4 (target's IP, looked up via wrap)", v4)
+	}
+	if !v6.Equal(net.ParseIP("fd16:1::4")) {
+		t.Errorf("v6: got %s want fd16:1::4", v6)
+	}
+}
+
+// Direct-attachment case: backend has its own Networks entry. The
+// follow path must not run — verified by failing if inspectNS is
+// called.
+func TestResolveSharedNetIPs_DirectAttachmentSkipsFollow(t *testing.T) {
+	c := container.Summary{
+		NetworkSettings: &container.NetworkSettingsSummary{
+			Networks: map[string]*network.EndpointSettings{
+				"transit": {IPAddress: "10.0.0.5"},
+			},
+		},
+	}
+	inspectNS := func(ref string) *container.NetworkSettingsSummary {
+		t.Fatalf("inspectNS must not be called when direct attachment exists, got ref %q", ref)
+		return nil
+	}
+	v4, _ := resolveSharedNetIPs(c, "transit", inspectNS)
+	if !v4.Equal(net.ParseIP("10.0.0.5")) {
+		t.Errorf("v4: got %s want 10.0.0.5", v4)
+	}
+}
+
+// Wrap that resolves to a nonexistent / shut-down target: inspectNS
+// returns nil and we propagate nil/nil so the caller logs and skips.
+func TestResolveSharedNetIPs_WrapTargetMissing(t *testing.T) {
+	wrap := container.Summary{
+		HostConfig: struct {
+			NetworkMode string `json:",omitempty"`
+			Annotations map[string]string `json:",omitempty"`
+		}{NetworkMode: "container:gone"},
+		NetworkSettings: &container.NetworkSettingsSummary{
+			Networks: map[string]*network.EndpointSettings{},
+		},
+	}
+	v4, v6 := resolveSharedNetIPs(wrap, "nextcloud-aio", func(string) *container.NetworkSettingsSummary { return nil })
+	if v4 != nil || v6 != nil {
+		t.Errorf("expected nil/nil when wrap target inspect returns nil, got %v/%v", v4, v6)
+	}
+}
+
 func TestTrimName(t *testing.T) {
 	if got := trimName(nil); got != "" {
 		t.Errorf("nil names: %q", got)

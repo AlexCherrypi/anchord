@@ -923,6 +923,63 @@ func TestRun_F45_ExtraEnvAndDeterministicOrder(t *testing.T) {
 	<-done
 }
 
+// Issue #3 / F-45: operator-supplied recipe.Labels must reach the
+// CreateSpec so F-42 selector mode can discover its own F-45 spawn.
+// The built-in anchord.managed-by=f45 always wins over an operator
+// attempt to override (defence-in-depth — config already rejects it).
+func TestRun_F45_OperatorLabelsReachSpec(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-nextcloud",
+		Names: []string{"/nextcloud-aio-talk"},
+		State: "running",
+	}
+	ops := newFakeOps([]ContainerInfo{target})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"nextcloud-aio": "172.16.1.2"},
+	}
+	ops.createNewID = "managed-sa-talk"
+
+	recipe := managedRecipe("nextcloud-aio-talk")
+	recipe.Labels = map[string]string{
+		"anchord.identity":   "nextcloud-talk",
+		"anchord.expose":     "tcp/3478:3478,udp/3478:3478",
+		"anchord.managed-by": "operator-attempt", // must be overridden
+	}
+	w := newWithOpsAndRecipe(ops, recipe, "nextcloud-aio")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	ops.eventCh <- EventMsg{Action: "start", ActorID: target.ID, ActorName: "nextcloud-aio-talk"}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(ops.createdSpecs()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	specs := ops.createdSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 Create, got %d", len(specs))
+	}
+	got := specs[0].Labels
+	if got["anchord.identity"] != "nextcloud-talk" {
+		t.Errorf("anchord.identity missing/wrong: %v", got)
+	}
+	if got["anchord.expose"] != "tcp/3478:3478,udp/3478:3478" {
+		t.Errorf("anchord.expose missing/wrong: %v", got)
+	}
+	if got["anchord.managed-by"] != "f45" {
+		t.Errorf("built-in anchord.managed-by=f45 must win over operator override, got %q", got["anchord.managed-by"])
+	}
+
+	cancel()
+	<-done
+}
+
 // F-45: Create failure must be logged and the loop must continue
 // (same robustness contract as Start failures).
 func TestRun_F45_CreateErrorTolerated(t *testing.T) {

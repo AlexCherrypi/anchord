@@ -20,7 +20,7 @@ func clearAnchordEnv(t *testing.T) {
 		"ANCHORD_LABEL_SELECTOR", "ANCHORD_AUTOSTART_SIBLINGS",
 		"ANCHORD_MANAGED_SA_TARGET", "ANCHORD_MANAGED_SA_NAME",
 		"ANCHORD_MANAGED_SA_IMAGE", "ANCHORD_MANAGED_SA_GATEWAY_IP",
-		"ANCHORD_MANAGED_SA_EXTRA_ENV",
+		"ANCHORD_MANAGED_SA_EXTRA_ENV", "ANCHORD_MANAGED_SA_LABELS",
 		"COMPOSE_PROJECT_NAME", "DOCKER_HOST",
 	} {
 		t.Setenv(k, "")
@@ -522,6 +522,72 @@ func TestLoad_ManagedSA_ExtraEnvMalformed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ANCHORD_MANAGED_SA_EXTRA_ENV") {
 		t.Errorf("error must mention the env var name, got: %v", err)
+	}
+}
+
+// Issue #3 / F-45: operator-supplied labels via JSON env land on the
+// recipe. anchord.identity / anchord.expose are the headline use case
+// (so F-42 selector mode can discover its own F-45 spawn).
+func TestLoad_ManagedSA_LabelsParsed(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-nextcloud")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "nextcloud-aio-talk")
+	t.Setenv("ANCHORD_MANAGED_SA_LABELS", `{"anchord.identity":"nextcloud-talk","anchord.expose":"tcp/3478:3478,udp/3478:3478"}`)
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.ManagedSA.Labels["anchord.identity"] != "nextcloud-talk" {
+		t.Errorf("anchord.identity not parsed: %v", cfg.ManagedSA.Labels)
+	}
+	if cfg.ManagedSA.Labels["anchord.expose"] != "tcp/3478:3478,udp/3478:3478" {
+		t.Errorf("anchord.expose not parsed: %v", cfg.ManagedSA.Labels)
+	}
+}
+
+// Issue #3: malformed JSON is fatal (same policy as EXTRA_ENV).
+func TestLoad_ManagedSA_LabelsMalformed(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-nextcloud")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "tgt")
+	t.Setenv("ANCHORD_MANAGED_SA_LABELS", "{not: json}")
+	_, err := LoadNetworkAnchor()
+	if err == nil {
+		t.Fatal("expected fatal error for malformed LABELS JSON")
+	}
+	if !strings.Contains(err.Error(), "ANCHORD_MANAGED_SA_LABELS") {
+		t.Errorf("error must mention the env var name, got: %v", err)
+	}
+}
+
+// Issue #2 + #3: compose.* keys are reserved and rejected at load.
+func TestLoad_ManagedSA_LabelsRejectsComposeKeys(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-nextcloud")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "tgt")
+	t.Setenv("ANCHORD_MANAGED_SA_LABELS", `{"com.docker.compose.service":"x"}`)
+	_, err := LoadNetworkAnchor()
+	if err == nil {
+		t.Fatal("expected fatal error for compose.* label")
+	}
+	if !strings.Contains(err.Error(), "com.docker.compose.") {
+		t.Errorf("error must name the offending prefix, got: %v", err)
+	}
+}
+
+// Issue #3: anchord.managed-by is reserved (built-in bookkeeping
+// value), so operator-supplied override is rejected at load.
+func TestLoad_ManagedSA_LabelsRejectsManagedBy(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "ix-nextcloud")
+	t.Setenv("ANCHORD_MANAGED_SA_TARGET", "tgt")
+	t.Setenv("ANCHORD_MANAGED_SA_LABELS", `{"anchord.managed-by":"custom"}`)
+	_, err := LoadNetworkAnchor()
+	if err == nil {
+		t.Fatal("expected fatal error for anchord.managed-by override")
+	}
+	if !strings.Contains(err.Error(), "anchord.managed-by") {
+		t.Errorf("error must name the reserved key, got: %v", err)
 	}
 }
 
