@@ -83,7 +83,7 @@ func ruleLess(a, b labels.Rule) bool {
 // Discoverer emits state updates.
 type Discoverer struct {
 	cli           *client.Client
-	project       string
+	discriminator []string // label predicates ("key=value") all containers must match (F-42)
 	pollInterval  time.Duration
 	sharedNetwork string // network anchord itself is in; used for IP resolution
 
@@ -91,13 +91,27 @@ type Discoverer struct {
 	stop chan struct{}
 }
 
-// New constructs a Discoverer. sharedNetwork is the docker network name
-// from which to read backend IPs — typically the compose "transit" net
-// that the anchord container also belongs to.
-func New(cli *client.Client, project, sharedNetwork string, poll time.Duration) *Discoverer {
+// New constructs a Discoverer scoped by `discriminator` label
+// predicates (each formatted as the Docker filter expects:
+// "key=value"). All predicates are AND-joined — a container must
+// carry every label to be considered a backend candidate. anchord
+// additionally enforces the anchord.expose presence check internally;
+// that is not a caller concern.
+//
+// sharedNetwork is the docker network name from which to read backend
+// IPs — typically the compose "transit" net that the anchord
+// container also belongs to.
+//
+// Two callers exist in production today (see cmd/anchord/main.go):
+//   - legacy ANCHORD_PROJECT mode: discriminator =
+//     ["com.docker.compose.project=<project>"]
+//   - F-42 selector mode: discriminator = the parsed
+//     ANCHORD_LABEL_SELECTOR rendered as one "key=value" entry per
+//     selector pair, deterministically ordered.
+func New(cli *client.Client, discriminator []string, sharedNetwork string, poll time.Duration) *Discoverer {
 	return &Discoverer{
 		cli:           cli,
-		project:       project,
+		discriminator: discriminator,
 		pollInterval:  poll,
 		sharedNetwork: sharedNetwork,
 		out:           make(chan State, 4),
@@ -139,9 +153,7 @@ func (d *Discoverer) pollLoop(ctx context.Context) {
 }
 
 func (d *Discoverer) eventLoop(ctx context.Context) error {
-	f := filters.NewArgs()
-	f.Add("type", "container")
-	f.Add("label", "com.docker.compose.project="+d.project)
+	f := buildEventFilter(d.discriminator)
 
 	for {
 		msgs, errs := d.cli.Events(ctx, events.ListOptions{Filters: f})
@@ -168,9 +180,7 @@ func (d *Discoverer) eventLoop(ctx context.Context) error {
 }
 
 func (d *Discoverer) snapshot(ctx context.Context) error {
-	f := filters.NewArgs()
-	f.Add("label", "com.docker.compose.project="+d.project)
-	f.Add("label", labels.LabelExpose)
+	f := buildSnapshotFilter(d.discriminator)
 
 	list, err := d.cli.ContainerList(ctx, container.ListOptions{Filters: f})
 	if err != nil {
@@ -208,6 +218,33 @@ func (d *Discoverer) snapshot(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	return nil
+}
+
+// buildSnapshotFilter constructs the Docker container-list filter for
+// a backend snapshot: every discriminator label (AND-joined) plus
+// presence of `anchord.expose`. Extracted so tests can verify the
+// filter shape without a live Docker daemon.
+func buildSnapshotFilter(discriminator []string) filters.Args {
+	f := filters.NewArgs()
+	for _, predicate := range discriminator {
+		f.Add("label", predicate)
+	}
+	f.Add("label", labels.LabelExpose)
+	return f
+}
+
+// buildEventFilter constructs the Docker event-stream filter:
+// container events whose actor carries every discriminator label.
+// The anchord.expose presence check is NOT included here on purpose —
+// we still want to see "container destroyed" events for things that
+// used to be exposed; the snapshot path re-evaluates membership.
+func buildEventFilter(discriminator []string) filters.Args {
+	f := filters.NewArgs()
+	f.Add("type", "container")
+	for _, predicate := range discriminator {
+		f.Add("label", predicate)
+	}
+	return f
 }
 
 // pickIPs selects the v4/v6 addresses from the shared network. If

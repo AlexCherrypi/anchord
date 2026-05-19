@@ -2,6 +2,8 @@ package discovery
 
 import (
 	"net"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/AlexCherrypi/anchord/internal/labels"
@@ -9,6 +11,65 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 )
+
+// F-42: the snapshot filter must contain every discriminator label
+// (AND-joined by Docker) plus the `anchord.expose` presence check.
+// Anything else would change which containers are considered backend
+// candidates.
+func TestBuildSnapshotFilter_LegacyProject(t *testing.T) {
+	args := buildSnapshotFilter([]string{"com.docker.compose.project=mailcow"})
+	got := args.Get("label")
+	sort.Strings(got)
+	want := []string{"anchord.expose", "com.docker.compose.project=mailcow"}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+}
+
+func TestBuildSnapshotFilter_LabelSelectorAnd(t *testing.T) {
+	args := buildSnapshotFilter([]string{
+		"anchord.role=ldap-outpost",
+		"env=prod",
+	})
+	got := args.Get("label")
+	sort.Strings(got)
+	want := []string{
+		"anchord.expose",
+		"anchord.role=ldap-outpost",
+		"env=prod",
+	}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+}
+
+// F-42 backwards-compat guard: when the discriminator list is empty,
+// the filter still includes the anchord.expose presence check (i.e.
+// the function never produces an unbounded "list every container"
+// filter, even on misconfiguration).
+func TestBuildSnapshotFilter_EmptyDiscriminatorKeepsExposeGuard(t *testing.T) {
+	args := buildSnapshotFilter(nil)
+	got := args.Get("label")
+	if len(got) != 1 || got[0] != "anchord.expose" {
+		t.Errorf("empty discriminator must still keep anchord.expose filter; got %v", got)
+	}
+}
+
+// Event filter does NOT include anchord.expose — that's deliberate
+// (we want destroyed-container events for things that just lost their
+// expose label too).
+func TestBuildEventFilter_NoExposeOnEvents(t *testing.T) {
+	args := buildEventFilter([]string{"anchord.role=ldap-outpost"})
+	got := args.Get("label")
+	if len(got) != 1 || got[0] != "anchord.role=ldap-outpost" {
+		t.Errorf("event filter labels: got %v, want only the discriminator", got)
+	}
+	if ts := args.Get("type"); len(ts) != 1 || ts[0] != "container" {
+		t.Errorf("event filter must scope to container events, got %v", ts)
+	}
+}
 
 func TestRuleLess(t *testing.T) {
 	cases := []struct {

@@ -298,7 +298,8 @@ All via environment variables.
 
 | Variable                     | Required | Default            | Notes |
 |------------------------------|----------|--------------------|-------|
-| `ANCHORD_PROJECT`            | yes      | `$COMPOSE_PROJECT_NAME` | Scope of containers anchord manages |
+| `ANCHORD_PROJECT`            | yes¹     | `$COMPOSE_PROJECT_NAME` | Scope of containers anchord manages. Required unless `ANCHORD_LABEL_SELECTOR` is set. Ignored (with a WARN log) when both are set |
+| `ANCHORD_LABEL_SELECTOR`     | no       |                    | F-42: replaces the project filter with an operator-defined label set, comma-separated `key=value` AND-joined (e.g. `anchord.role=ldap-outpost,env=prod`). Use when multiple anchords share a project, or when target containers are spawned outside Compose and carry no project label (e.g. authentik outposts) |
 | `ANCHORD_ADDRESS_MODE`       | no       | `bootstrap`        | `bootstrap` (keep Docker-assigned IP), `dhcp-refresh` (DHCP-replace it), or `slaac-ra-only` (Docker-assigned v4, kernel SLAAC for v6) |
 | `ANCHORD_EXT_NETWORK`        | no       |                    | Docker network name of the external macvlan (e.g. `dmz_macvlan`). When set, anchord resolves its iface via the Docker API by MAC match. **Strongly recommended for any stack with 2+ networks** — `ANCHORD_EXT_IFACE=eth0` is a coin flip across recreates because Docker's eth0/eth1 assignment is non-deterministic |
 | `ANCHORD_EXT_IFACE`          | no       | `eth0`             | In-container name of the macvlan interface. Used only when `ANCHORD_EXT_NETWORK` is unset; if both are set, `ANCHORD_EXT_NETWORK` wins and a WARN is logged |

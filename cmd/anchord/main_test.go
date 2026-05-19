@@ -1,9 +1,86 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// F-42 precedence resolution: selector wins, project is informational
+// only when both are set, project alone is the legacy path.
+func TestBuildDiscoveryDiscriminator(t *testing.T) {
+	cases := []struct {
+		name     string
+		project  string
+		selector map[string]string
+		want     []string
+	}{
+		{
+			name:    "legacy project only",
+			project: "mailcow",
+			want:    []string{"com.docker.compose.project=mailcow"},
+		},
+		{
+			name:     "selector replaces project (both set, both ignored on selector path)",
+			project:  "ix-authentik",
+			selector: map[string]string{"anchord.role": "ldap-outpost"},
+			want:     []string{"anchord.role=ldap-outpost"},
+		},
+		{
+			name:    "selector alone",
+			project: "",
+			selector: map[string]string{
+				"anchord.role": "ldap-outpost",
+			},
+			want: []string{"anchord.role=ldap-outpost"},
+		},
+		{
+			name:    "selector AND-joined, deterministic order by key",
+			project: "",
+			selector: map[string]string{
+				"env":          "prod",
+				"anchord.role": "ldap-outpost",
+			},
+			// Sorted by key: "anchord.role" < "env".
+			want: []string{"anchord.role=ldap-outpost", "env=prod"},
+		},
+		{
+			name:    "empty selector empty project → nil (config layer guards this)",
+			project: "",
+			want:    nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildDiscoveryDiscriminator(tc.project, tc.selector)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// F-42 determinism guard: the selector → predicates conversion must
+// produce the same ordering on every call. Run a high-cardinality
+// selector many times and assert byte-equal output.
+func TestBuildDiscoveryDiscriminator_Deterministic(t *testing.T) {
+	sel := map[string]string{
+		"z-key":          "1",
+		"a-key":          "2",
+		"m-key":          "3",
+		"anchord.role":   "ldap-outpost",
+		"env":            "prod",
+		"com.acme.team":  "infra",
+		"another.label":  "value",
+	}
+	first := buildDiscoveryDiscriminator("", sel)
+	for i := 0; i < 200; i++ {
+		again := buildDiscoveryDiscriminator("", sel)
+		if !reflect.DeepEqual(first, again) {
+			t.Fatalf("iteration %d differed: %v vs %v", i, again, first)
+		}
+	}
+}
 
 // TestPickSharedNetwork covers F-38: the shared-network picker must
 // never return ANCHORD_EXT_NETWORK (the external macvlan), prefer a

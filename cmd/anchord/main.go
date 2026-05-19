@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -217,14 +218,18 @@ func runNetworkAnchor(ctx context.Context) error {
 	}()
 
 	// 5. Discovery — finds the shared transit network by inspecting our
-	//    own container and emits state snapshots.
+	//    own container and emits state snapshots. Selector vs project
+	//    is resolved here (F-42): a non-empty ANCHORD_LABEL_SELECTOR
+	//    wins outright; ANCHORD_PROJECT is logged-and-ignored when
+	//    both are set.
 	sharedNet, err := detectSharedNetwork(cancelCtx, cli, cfg.ExtNetwork)
 	if err != nil {
 		slog.Warn("could not auto-detect shared network", "err", err)
 	} else {
 		slog.Info("discovered shared network", "name", sharedNet)
 	}
-	disc := discovery.New(cli, cfg.ComposeProject, sharedNet, cfg.PollInterval)
+	discriminator := buildDiscoveryDiscriminator(cfg.ComposeProject, cfg.LabelSelector)
+	disc := discovery.New(cli, discriminator, sharedNet, cfg.PollInterval)
 	go func() {
 		if err := disc.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
 			slog.Error("discovery exited", "err", err)
@@ -345,6 +350,48 @@ func pickSharedNetwork(names []string, excludeNet string) (string, error) {
 
 func containsFold(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// buildDiscoveryDiscriminator resolves the F-42 selector-vs-project
+// precedence into the list of Docker label predicates the discoverer
+// will use to scope its backend search.
+//
+// Rules:
+//   - selector non-empty: selector wins. Each key=value pair becomes
+//     one predicate (deterministic order by key). If project is ALSO
+//     set, log a WARN naming the ignored project so the operator
+//     isn't surprised — but proceed.
+//   - selector empty, project set: classic behaviour — single
+//     "com.docker.compose.project=<project>" predicate.
+//   - both empty: returns nil. Config.LoadNetworkAnchor rejects that
+//     combination, so we never reach here in practice; the nil return
+//     is defence-in-depth.
+//
+// The selector log line at INFO level is the operator-facing signal
+// that "this anchord instance is the selector-scoped one"; matches
+// SPEC F-42 §"Behaviour" point 4.
+func buildDiscoveryDiscriminator(project string, selector map[string]string) []string {
+	if len(selector) > 0 {
+		if project != "" {
+			slog.Warn("ANCHORD_LABEL_SELECTOR set; ANCHORD_PROJECT ignored",
+				"ignored_project", project)
+		}
+		keys := make([]string, 0, len(selector))
+		for k := range selector {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		out := make([]string, 0, len(keys))
+		for _, k := range keys {
+			out = append(out, k+"="+selector[k])
+		}
+		slog.Info("backend label selector active", "selector", strings.Join(out, ","))
+		return out
+	}
+	if project != "" {
+		return []string{"com.docker.compose.project=" + project}
+	}
+	return nil
 }
 
 func setupLogger(level string) {

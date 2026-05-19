@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +76,21 @@ type NetworkAnchor struct {
 	// AddressMode picks how the external IPv4 is obtained (bootstrap
 	// vs dhcp-refresh vs slaac-ra-only). Default "bootstrap".
 	AddressMode AddressMode
+
+	// LabelSelector is the operator-defined set of labels a container
+	// must carry (AND-joined) to be considered a backend candidate.
+	// When non-empty it REPLACES the legacy project-label filter
+	// (com.docker.compose.project=ComposeProject); when empty the
+	// legacy filter is used unchanged.
+	//
+	// Two motivations (SPEC F-42):
+	//   1. Multiple network-anchors in the same compose project, each
+	//      scoped to a disjoint slice of containers (per-team, per-
+	//      service-flavour).
+	//   2. Backend containers spawned outside Compose (e.g. authentik
+	//      outposts) that carry no com.docker.compose.project label
+	//      and are therefore invisible to the legacy filter.
+	LabelSelector map[string]string
 
 	// DHCPHostname is the hostname (and the basis of the client-id)
 	// announced to the DHCP server in dhcp-refresh mode. Defaults to
@@ -146,11 +162,29 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 		// Fall back to the env compose itself injects.
 		c.ComposeProject = os.Getenv("COMPOSE_PROJECT_NAME")
 	}
-	if c.ComposeProject == "" {
-		return nil, fmt.Errorf("ANCHORD_PROJECT (or COMPOSE_PROJECT_NAME) must be set")
+
+	// F-42 label selector: parsed up-front so we can decide whether
+	// ANCHORD_PROJECT is required (legacy path) or optional (selector
+	// path).
+	selector, err := parseLabelSelector(os.Getenv("ANCHORD_LABEL_SELECTOR"))
+	if err != nil {
+		return nil, err
+	}
+	c.LabelSelector = selector
+
+	if c.ComposeProject == "" && len(c.LabelSelector) == 0 {
+		return nil, fmt.Errorf("ANCHORD_PROJECT (or COMPOSE_PROJECT_NAME) must be set unless ANCHORD_LABEL_SELECTOR is")
 	}
 	if c.DHCPHostname == "" {
-		c.DHCPHostname = c.ComposeProject
+		// Reasonable default: project name if we have one, else first
+		// selector value (deterministic across restarts of the same
+		// selector config; a single-value selector is the common
+		// per-anchor-flavour case from F-42).
+		if c.ComposeProject != "" {
+			c.DHCPHostname = c.ComposeProject
+		} else {
+			c.DHCPHostname = firstSelectorValue(c.LabelSelector)
+		}
 	}
 
 	mode, err := parseAddressMode(os.Getenv("ANCHORD_ADDRESS_MODE"))
@@ -230,6 +264,65 @@ func parseGatewayIPs(raw string) ([]net.IP, error) {
 		}
 	}
 	return out, nil
+}
+
+// parseLabelSelector turns the ANCHORD_LABEL_SELECTOR env value into
+// a map[string]string for use as a Docker label filter.
+//
+// Format (F-42): comma-separated key=value pairs, whitespace tolerated
+// around commas and around `=`. Equality only — no `!=`, no set
+// membership, no wildcards.
+//
+// Errors are fatal because they signal misconfiguration that would
+// otherwise produce a silently-wrong discovery scope:
+//   - entry without `=` → `"label selector entry %q missing '='"`
+//   - same key with two different values → conflict message naming
+//     the offending key and both values
+//
+// Empty value (`key=`) is *valid* and matches containers carrying the
+// label `key` with the literal empty string. No "any value" wildcard;
+// the spec defers that to a hypothetical F-43.
+func parseLabelSelector(raw string) (map[string]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]string{}, nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			return nil, fmt.Errorf("label selector entry %q missing '='", trimmed)
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" {
+			return nil, fmt.Errorf("label selector entry %q has empty key", trimmed)
+		}
+		if existing, dup := out[k]; dup && existing != v {
+			return nil, fmt.Errorf("label selector has duplicate key %q with conflicting values %q and %q", k, existing, v)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// firstSelectorValue returns one selector value, deterministically
+// (keys sorted) so the chosen DHCP hostname is stable across process
+// restarts when no ANCHORD_DHCP_HOSTNAME is supplied. Returns "" for
+// an empty selector — the caller guards against that.
+func firstSelectorValue(sel map[string]string) string {
+	keys := make([]string, 0, len(sel))
+	for k := range sel {
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return sel[keys[0]]
 }
 
 // parseAddressMode maps the raw env value to an AddressMode. Empty
