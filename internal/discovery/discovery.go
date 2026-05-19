@@ -80,12 +80,27 @@ func ruleLess(a, b labels.Rule) bool {
 	return a.Port < b.Port
 }
 
+// SharedNetworkResolver returns the Docker network anchord should
+// read backend IPs from for the current backend snapshot. It is
+// called once per snapshot with the per-network co-attachment count
+// of the just-listed backends; implementations may be stateful
+// (e.g. internal/sharednet.Picker settles after the first observed
+// backend, F-44 §"Stable once decided"). The chosen network must be
+// one anchord itself is attached to — picker enforces that at
+// construction, callers don't have to.
+type SharedNetworkResolver interface {
+	Pick(backendNetworks map[string]int) string
+	// Chosen returns the most recently picked network without
+	// re-running the heuristic. Used for logging only.
+	Chosen() string
+}
+
 // Discoverer emits state updates.
 type Discoverer struct {
 	cli           *client.Client
-	discriminator []string // label predicates ("key=value") all containers must match (F-42)
+	discriminator []string              // label predicates ("key=value") all containers must match (F-42)
 	pollInterval  time.Duration
-	sharedNetwork string // network anchord itself is in; used for IP resolution
+	shared        SharedNetworkResolver // F-44 — network for IP reads, possibly stateful
 
 	out  chan State
 	stop chan struct{}
@@ -98,9 +113,8 @@ type Discoverer struct {
 // additionally enforces the anchord.expose presence check internally;
 // that is not a caller concern.
 //
-// sharedNetwork is the docker network name from which to read backend
-// IPs — typically the compose "transit" net that the anchord
-// container also belongs to.
+// `shared` resolves the per-snapshot shared-network choice (F-44).
+// Pass a sharednet.Picker in production; tests inject stubs.
 //
 // Two callers exist in production today (see cmd/anchord/main.go):
 //   - legacy ANCHORD_PROJECT mode: discriminator =
@@ -108,12 +122,12 @@ type Discoverer struct {
 //   - F-42 selector mode: discriminator = the parsed
 //     ANCHORD_LABEL_SELECTOR rendered as one "key=value" entry per
 //     selector pair, deterministically ordered.
-func New(cli *client.Client, discriminator []string, sharedNetwork string, poll time.Duration) *Discoverer {
+func New(cli *client.Client, discriminator []string, shared SharedNetworkResolver, poll time.Duration) *Discoverer {
 	return &Discoverer{
 		cli:           cli,
 		discriminator: discriminator,
 		pollInterval:  poll,
-		sharedNetwork: sharedNetwork,
+		shared:        shared,
 		out:           make(chan State, 4),
 		stop:          make(chan struct{}),
 	}
@@ -187,6 +201,24 @@ func (d *Discoverer) snapshot(ctx context.Context) error {
 		return fmt.Errorf("ContainerList: %w", err)
 	}
 
+	// F-44: count backend co-attachment per network and ask the
+	// resolver which network to use. Stateful Pickers (production
+	// internal/sharednet.Picker) settle the first time a backend
+	// is seen on the chosen network — subsequent calls are cheap.
+	prevShared := ""
+	if d.shared != nil {
+		prevShared = d.shared.Chosen()
+	}
+	counts := countBackendsPerNetwork(list)
+	shared := ""
+	if d.shared != nil {
+		shared = d.shared.Pick(counts)
+	}
+	if shared != prevShared && prevShared != "" {
+		slog.Info("shared network re-picked",
+			"old", prevShared, "new", shared)
+	}
+
 	state := State{Backends: make(map[string]Backend, len(list))}
 	for _, c := range list {
 		spec, err := labels.Parse(c.Labels)
@@ -197,11 +229,11 @@ func (d *Discoverer) snapshot(ctx context.Context) error {
 		if spec == nil {
 			continue
 		}
-		ipv4, ipv6 := pickIPs(c, d.sharedNetwork)
+		ipv4, ipv6 := pickIPs(c, shared)
 		if ipv4 == nil && ipv6 == nil {
 			slog.Warn("no usable IP for container",
 				"container", trimName(c.Names),
-				"shared_network", d.sharedNetwork)
+				"shared_network", shared)
 			continue
 		}
 		state.Backends[c.ID] = Backend{
@@ -245,6 +277,26 @@ func buildEventFilter(discriminator []string) filters.Args {
 		f.Add("label", predicate)
 	}
 	return f
+}
+
+// countBackendsPerNetwork sums network attachments across the backend
+// container list — the input the sharednet.Picker needs to apply the
+// F-44 co-attachment heuristic. A backend on N networks contributes N
+// to the totals.
+func countBackendsPerNetwork(list []container.Summary) map[string]int {
+	out := map[string]int{}
+	for _, c := range list {
+		if c.NetworkSettings == nil {
+			continue
+		}
+		for name, n := range c.NetworkSettings.Networks {
+			if n == nil {
+				continue
+			}
+			out[name]++
+		}
+	}
+	return out
 }
 
 // pickIPs selects the v4/v6 addresses from the shared network. If

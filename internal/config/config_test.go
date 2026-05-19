@@ -14,10 +14,10 @@ func clearAnchordEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"ANCHORD_PROJECT", "ANCHORD_EXT_IFACE", "ANCHORD_EXT_NETWORK",
-		"ANCHORD_ADDRESS_MODE", "ANCHORD_DHCP_HOSTNAME",
-		"ANCHORD_POLL_INTERVAL", "ANCHORD_DHCP_BACKOFF_MAX",
-		"ANCHORD_LOG_LEVEL", "ANCHORD_LABEL_SELECTOR",
-		"ANCHORD_AUTOSTART_SIBLINGS",
+		"ANCHORD_SHARED_NETWORK", "ANCHORD_ADDRESS_MODE",
+		"ANCHORD_DHCP_HOSTNAME", "ANCHORD_POLL_INTERVAL",
+		"ANCHORD_DHCP_BACKOFF_MAX", "ANCHORD_LOG_LEVEL",
+		"ANCHORD_LABEL_SELECTOR", "ANCHORD_AUTOSTART_SIBLINGS",
 		"COMPOSE_PROJECT_NAME", "DOCKER_HOST",
 	} {
 		t.Setenv(k, "")
@@ -106,6 +106,34 @@ func TestLoad_DefaultsAndDerivations(t *testing.T) {
 	}
 	if cfg.MetricsAddr != "127.0.0.1:9090" {
 		t.Errorf("MetricsAddr default: %q", cfg.MetricsAddr)
+	}
+}
+
+// F-44: ANCHORD_SHARED_NETWORK is optional; default empty means
+// "use heuristic". Validation of "must be in self-networks" happens
+// in internal/sharednet, not at config-load time.
+func TestLoad_SharedNetworkPin(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	t.Setenv("ANCHORD_SHARED_NETWORK", "wrap_transit")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.SharedNetwork != "wrap_transit" {
+		t.Errorf("SharedNetwork: got %q want wrap_transit", cfg.SharedNetwork)
+	}
+}
+
+func TestLoad_SharedNetworkEmptyByDefault(t *testing.T) {
+	clearAnchordEnv(t)
+	t.Setenv("ANCHORD_PROJECT", "mailcow")
+	cfg, err := LoadNetworkAnchor()
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if cfg.SharedNetwork != "" {
+		t.Errorf("SharedNetwork should default to empty, got %q", cfg.SharedNetwork)
 	}
 }
 

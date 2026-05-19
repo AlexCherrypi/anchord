@@ -38,6 +38,7 @@ import (
 	"github.com/AlexCherrypi/anchord/internal/nat"
 	"github.com/AlexCherrypi/anchord/internal/reconciler"
 	"github.com/AlexCherrypi/anchord/internal/serviceanchor"
+	"github.com/AlexCherrypi/anchord/internal/sharednet"
 
 	"github.com/docker/docker/client"
 )
@@ -218,19 +219,28 @@ func runNetworkAnchor(ctx context.Context) error {
 		}
 	}()
 
-	// 5. Discovery — finds the shared transit network by inspecting our
-	//    own container and emits state snapshots. Selector vs project
-	//    is resolved here (F-42): a non-empty ANCHORD_LABEL_SELECTOR
-	//    wins outright; ANCHORD_PROJECT is logged-and-ignored when
-	//    both are set.
-	sharedNet, err := detectSharedNetwork(cancelCtx, cli, cfg.ExtNetwork)
+	// 5. Discovery — build a SharedNetworkPicker (F-44) from anchord's
+	//    own container inspect, then hand it to the Discoverer so each
+	//    snapshot reconciles its choice against observed backend
+	//    co-attachment. Empty ANCHORD_SHARED_NETWORK = heuristic mode;
+	//    explicit value = pinned (validated to be one of self-networks).
+	//
+	//    Selector vs project (F-42) is resolved here: a non-empty
+	//    ANCHORD_LABEL_SELECTOR wins outright; ANCHORD_PROJECT is
+	//    logged-and-ignored when both are set.
+	selfNets, err := selfNetworks(cancelCtx, cli)
 	if err != nil {
-		slog.Warn("could not auto-detect shared network", "err", err)
-	} else {
-		slog.Info("discovered shared network", "name", sharedNet)
+		return fmt.Errorf("inspect self for shared-network picker: %w", err)
 	}
+	picker, err := sharednet.New(selfNets, cfg.ExtNetwork, cfg.SharedNetwork)
+	if err != nil {
+		return fmt.Errorf("shared-network picker: %w", err)
+	}
+	slog.Info("shared-network picker initialised",
+		"candidates", picker.Candidates(),
+		"pinned", cfg.SharedNetwork)
 	discriminator := buildDiscoveryDiscriminator(cfg.ComposeProject, cfg.LabelSelector)
-	disc := discovery.New(cli, discriminator, sharedNet, cfg.PollInterval)
+	disc := discovery.New(cli, discriminator, picker, cfg.PollInterval)
 	go func() {
 		if err := disc.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
 			slog.Error("discovery exited", "err", err)
@@ -303,74 +313,29 @@ func startMetrics(ctx context.Context, addr string, extra map[string]http.Handle
 	}()
 }
 
-// detectSharedNetwork inspects the anchord container itself to find
-// which compose-project network it lives in. That's the network we'll
-// read backend IPs from.
-//
-// Selection rules (F-38):
-//  1. Skip the external macvlan (excludeNet, typically cfg.ExtNetwork)
-//     — backends never live there, anchord just attaches to forward
-//     inbound and masquerade outbound.
-//  2. From what remains: prefer a network whose name contains
-//     "transit" (case-insensitive). That's the documented convention
-//     for the per-project anchor↔service-anchor bridge.
-//  3. Otherwise return any remaining candidate (Go-map random order,
-//     but at least never the macvlan).
-//  4. If excludeNet is empty: rules 2 and 3 apply unchanged from v1.
-//  5. If exclusion leaves nothing: error with a clearer message than
-//     "no networks on self" so wrap-pattern misconfiguration surfaces.
-func detectSharedNetwork(ctx context.Context, cli *client.Client, excludeNet string) (string, error) {
+// selfNetworks inspects the anchord container itself and returns the
+// list of Docker networks it's currently attached to. The
+// sharednet.Picker takes this plus ANCHORD_EXT_NETWORK and the
+// optional ANCHORD_SHARED_NETWORK pin to decide which network to use
+// for backend IP reads. F-38 (exclude EXT) and F-44 (co-attachment-
+// based pick + re-evaluation) both live in internal/sharednet now.
+func selfNetworks(ctx context.Context, cli *client.Client) ([]string, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	insp, err := cli.ContainerInspect(ctx, hostname)
 	if err != nil {
-		return "", fmt.Errorf("inspect self (%s): %w", hostname, err)
+		return nil, fmt.Errorf("inspect self (%s): %w", hostname, err)
 	}
 	if insp.NetworkSettings == nil || len(insp.NetworkSettings.Networks) == 0 {
-		return "", fmt.Errorf("no networks on self")
+		return nil, fmt.Errorf("no networks on self")
 	}
 	names := make([]string, 0, len(insp.NetworkSettings.Networks))
 	for name := range insp.NetworkSettings.Networks {
 		names = append(names, name)
 	}
-	return pickSharedNetwork(names, excludeNet)
-}
-
-// pickSharedNetwork is the pure-function core of detectSharedNetwork,
-// extracted so tests can drive it without a live Docker daemon.
-//
-// Returns an error rather than the empty string when excludeNet
-// removes the last candidate — anchord without a non-EXT network has
-// nowhere to read backend IPs from, which is a configuration error.
-func pickSharedNetwork(names []string, excludeNet string) (string, error) {
-	if len(names) == 0 {
-		return "", fmt.Errorf("no networks on self")
-	}
-	var first, transit string
-	for _, name := range names {
-		if excludeNet != "" && name == excludeNet {
-			continue
-		}
-		if first == "" {
-			first = name
-		}
-		if transit == "" && containsFold(name, "transit") {
-			transit = name
-		}
-	}
-	if transit != "" {
-		return transit, nil
-	}
-	if first != "" {
-		return first, nil
-	}
-	return "", fmt.Errorf("only EXT_NETWORK %q on self; need at least one project-internal network", excludeNet)
-}
-
-func containsFold(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+	return names, nil
 }
 
 // buildDiscoveryDiscriminator resolves the F-42 selector-vs-project

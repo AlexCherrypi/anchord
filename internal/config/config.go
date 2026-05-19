@@ -64,6 +64,18 @@ type NetworkAnchor struct {
 	// and prefer ExtNetwork in that case.
 	ExtIfaceName string
 
+	// SharedNetwork is the operator-pinned network name for backend
+	// IP reads — bypasses the F-44 co-attachment heuristic. When
+	// non-empty, anchord uses this network and does not try to
+	// auto-detect. Must be one of the networks anchord is attached
+	// to (validated at startup, fatal on typo).
+	//
+	// Empty means heuristic mode: detect at startup, refine on
+	// reconciles until a backend is observed (SPEC F-44 §"Behaviour"
+	// points 1-2). The most-common single-shared-bridge stacks
+	// don't need this var — the heuristic picks the only candidate.
+	SharedNetwork string
+
 	// ExtNetwork is the Docker network name of the external macvlan
 	// (matches the `name:` field on the network in compose, e.g.
 	// "dmz_macvlan"). When set, anchord queries the Docker API for
@@ -168,6 +180,7 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 		ComposeProject: os.Getenv("ANCHORD_PROJECT"),
 		ExtIfaceName:   getenvDefault("ANCHORD_EXT_IFACE", "eth0"),
 		ExtNetwork:     os.Getenv("ANCHORD_EXT_NETWORK"),
+		SharedNetwork:  os.Getenv("ANCHORD_SHARED_NETWORK"),
 		DHCPHostname:   os.Getenv("ANCHORD_DHCP_HOSTNAME"),
 		DockerHost:     getenvDefault("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		LogLevel:       getenvDefault("ANCHORD_LOG_LEVEL", "info"),
