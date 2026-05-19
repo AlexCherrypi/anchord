@@ -54,13 +54,12 @@ func newManager(t *testing.T) *Manager {
 }
 
 // readMap reads the kernel's current view of an anchord DNAT
-// (addr, port) pair by joining the two per-(family, proto) maps.
-// mapBase is "dnat_tcp" or "dnat_udp" — the address map; the port
-// map's name is derived as mapBase+"_port".
+// address map (the fast path for non-translating entries).
+// Translating entries live in the dnat_xlat_* sub-chain and are
+// asserted on separately via c.GetRules — see the F-46 tests below.
 //
-// F-46: the addr map's value is just the IP bytes (4 for v4 / 16
-// for v6); the port map's value is a 2-byte BE port. We zip them on
-// the shared DMZ-port key.
+// The returned Target carries IP and Port=key (since map entries are
+// non-translating by construction).
 func readMap(t *testing.T, family Family, mapBase string) map[uint16]Target {
 	t.Helper()
 	c := &nftables.Conn{}
@@ -70,29 +69,11 @@ func readMap(t *testing.T, family Family, mapBase string) map[uint16]Target {
 	}
 
 	addrElems := readSetElements(t, c, tbl, mapBase)
-	portElems := readSetElements(t, c, tbl, mapBase+"_port")
 
 	out := make(map[uint16]Target, len(addrElems))
 	for _, e := range addrElems {
 		key := binaryutil.BigEndian.Uint16(e.Key)
-		out[key] = Target{IP: net.IP(e.Val)}
-	}
-	for _, e := range portElems {
-		key := binaryutil.BigEndian.Uint16(e.Key)
-		tgt := out[key]
-		if len(e.Val) < 2 {
-			t.Fatalf("port map element val too short: %d bytes", len(e.Val))
-		}
-		tgt.Port = binaryutil.BigEndian.Uint16(e.Val[:2])
-		out[key] = tgt
-	}
-	// Drop entries that only appeared in the port map (shouldn't
-	// happen in practice but keeps the test honest about the
-	// invariant: both maps stay in lockstep).
-	for k, v := range out {
-		if v.IP == nil {
-			delete(out, k)
-		}
+		out[key] = Target{IP: net.IP(e.Val), Port: key}
 	}
 	return out
 }
@@ -256,6 +237,38 @@ func TestIntegrationSetMapPortTranslation(t *testing.T) {
 	}
 	if len(rules) != 1 {
 		t.Fatalf("dnat_xlat_tcp should have exactly 1 rule, got %d", len(rules))
+	}
+}
+
+// Issue #1 regression: a V6 translating entry hit ERANGE on netlink
+// commit because the xlat rule loaded the backend port into raw
+// register 6, which the kernel parses as a modern-numbered register
+// landing inside the verdict-register window. Fix: use legacy reg 3
+// for the port in both families — the v6 address in legacy reg 2
+// occupies that slot only, so reg 3 stays free.
+func TestIntegrationSetMapV6PortTranslation(t *testing.T) {
+	requireNetAdmin(t)
+	m := newManager(t)
+
+	state := map[uint16]Target{
+		636: {IP: net.ParseIP("fd31:80::9"), Port: 6636},
+	}
+	if err := m.SetMap(V6, "tcp", state); err != nil {
+		t.Fatalf("SetMap: %v", err)
+	}
+
+	if got := readMap(t, V6, "dnat_tcp"); len(got) != 0 {
+		t.Errorf("address map should be empty for translation-only state, got %v", got)
+	}
+
+	c := &nftables.Conn{}
+	tbl := &nftables.Table{Name: tableV6, Family: nftables.TableFamilyIPv6}
+	rules, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "dnat_xlat_tcp"})
+	if err != nil {
+		t.Fatalf("GetRules(dnat_xlat_tcp): %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("v6 dnat_xlat_tcp should have exactly 1 rule, got %d", len(rules))
 	}
 }
 

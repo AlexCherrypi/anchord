@@ -430,15 +430,30 @@ func (m *Manager) SetMap(family Family, proto string, entries map[uint16]Target)
 //
 // Address and port are loaded into registers via Immediate exprs
 // (literal values, not map lookups — that's what tripped the kernel
-// in the abandoned two-Lookup variant). Register layout:
-//   - v4: addr in reg 2, port in reg 3
-//   - v6: addr in regs 2-5, port in reg 6
+// in the abandoned two-Lookup variant).
+//
+// Register layout: nftables exposes registers in two views — legacy
+// regs 1..4 are 16-byte slots, modern regs 8..23 are 4-byte slots
+// aliased over the same byte array. We use legacy registers here:
+//
+//   - reg 2 holds the backend address. For v4 the address is 4 bytes
+//     (the upper 12 bytes of the slot are don't-care, NAT reads only
+//     the family-specific length); for v6 the address fills the full
+//     16-byte slot.
+//   - reg 3 holds the backend port (2 bytes inside a 16-byte slot).
+//
+// This works for *both* families because the v6 address in reg 2
+// occupies only that slot, never spilling into reg 3 — kernel-side
+// legacy regs are non-overlapping 16-byte windows. Issue #1: an
+// earlier version used `reg 6` for the v6 port, but raw reg 6 isn't
+// in the legacy range, so the kernel routed it through the modern
+// reg space and landed inside the verdict register window, returning
+// ERANGE on netlink commit.
 func xlatRuleExprs(fam Family, dmzPort uint16, ipBytes []byte, backendPort uint16) []expr.Any {
-	regAddr := uint32(2)
-	regProto := uint32(3)
-	if fam == V6 {
-		regProto = 6
-	}
+	const (
+		regAddr  uint32 = 2
+		regProto uint32 = 3
+	)
 	return []expr.Any{
 		// Match dport.
 		&expr.Payload{
