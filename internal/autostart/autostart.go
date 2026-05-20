@@ -100,6 +100,12 @@ type dockerOps interface {
 	// so callers don't need to deduplicate.
 	Start(ctx context.Context, id string) error
 
+	// Remove force-removes a container. Used by F-45 (issue #5) when
+	// the managed service-anchor is bound to a stale/dead netns and
+	// must be recreated against the current target's netns. Removing
+	// a missing container is treated as success by docker.
+	Remove(ctx context.Context, id string) error
+
 	// Create issues a docker container.create call from the given
 	// recipe and returns the new container ID. F-45 calls Create
 	// followed by Start; idempotency on duplicate names is handled
@@ -311,9 +317,30 @@ func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target C
 	if existing != nil {
 		switch strings.ToLower(existing.State) {
 		case "running":
-			slog.Debug("managed service-anchor already running",
-				"name", w.recipe.Name, "target", w.recipe.Target)
-			return
+			if !saTargetsStaleNetns(*existing, target, all) {
+				slog.Debug("managed service-anchor already running",
+					"name", w.recipe.Name, "target", w.recipe.Target)
+				return
+			}
+			// Issue #5: the SA is "running" per Docker but its netns
+			// reference resolves to a different container than the
+			// current target. Happens when an outside orchestrator
+			// (Authentik outpost controller, K8s-style operators)
+			// recreated the target — the SA is stuck on the old
+			// container's dead netns and traffic asymmetrically
+			// bypasses anchord. Force-recreate against the live
+			// target.
+			slog.Info("managed service-anchor bound to stale netns; recreating",
+				"name", w.recipe.Name,
+				"sa_netmode", existing.NetworkMode,
+				"current_target_id", target.ID,
+				"source", source)
+			if err := w.ops.Remove(ctx, existing.ID); err != nil {
+				slog.Warn("failed to remove stale managed service-anchor; will retry next event",
+					"name", w.recipe.Name, "err", err)
+				return
+			}
+			// Fall through to createAndStartManaged below.
 		case "created":
 			// The F-43 path above already issued Start on this sibling
 			// (matchSiblings will have found it). No need to repeat —
@@ -329,6 +356,37 @@ func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target C
 
 	// F-45 NEW path: create from recipe then start.
 	w.createAndStartManaged(ctx, target, source)
+}
+
+// saTargetsStaleNetns reports whether the managed SA's
+// `network_mode: container:<ref>` reference resolves to a container
+// other than `target` (or doesn't resolve at all). The check uses
+// the supplied container list — no extra Docker round-trip — and
+// handles all three forms Docker stores: full ID, short ID prefix,
+// and name. A non-container netmode (host, bridge, none) is treated
+// as non-stale: not our concern, the operator picked that.
+func saTargetsStaleNetns(sa ContainerInfo, target ContainerInfo, all []ContainerInfo) bool {
+	ref, ok := strings.CutPrefix(sa.NetworkMode, "container:")
+	if !ok {
+		return false
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return false
+	}
+	for _, c := range all {
+		if c.ID == ref || (len(ref) >= 12 && strings.HasPrefix(c.ID, ref)) {
+			return c.ID != target.ID
+		}
+		for _, n := range c.Names {
+			if strings.TrimPrefix(n, "/") == ref {
+				return c.ID != target.ID
+			}
+		}
+	}
+	// Ref doesn't resolve to any container Docker currently lists —
+	// netns is definitely dead.
+	return true
 }
 
 // createAndStartManaged inspects self for default values, assembles
@@ -549,6 +607,10 @@ func (a dockerAdapter) List(ctx context.Context) ([]ContainerInfo, error) {
 
 func (a dockerAdapter) Start(ctx context.Context, id string) error {
 	return a.cli.ContainerStart(ctx, id, container.StartOptions{})
+}
+
+func (a dockerAdapter) Remove(ctx context.Context, id string) error {
+	return a.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
 }
 
 func (a dockerAdapter) Create(ctx context.Context, spec CreateSpec) (string, error) {

@@ -172,6 +172,9 @@ type fakeOps struct {
 	startErr   map[string]error
 	startCalls int
 
+	removedIDs []string
+	removeErr  map[string]error
+
 	created     []CreateSpec // F-45: every CreateSpec the watcher built
 	createErr   error
 	createNewID string // ID returned from Create (default "managed-sa-new")
@@ -188,6 +191,7 @@ func newFakeOps(listResults []ContainerInfo) *fakeOps {
 	return &fakeOps{
 		listResults: listResults,
 		startErr:    map[string]error{},
+		removeErr:   map[string]error{},
 		eventCh:     make(chan EventMsg, 8),
 		errCh:       make(chan error, 1),
 	}
@@ -213,6 +217,26 @@ func (f *fakeOps) Start(_ context.Context, id string) error {
 		return err
 	}
 	f.startedIDs = append(f.startedIDs, id)
+	return nil
+}
+
+func (f *fakeOps) Remove(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err, ok := f.removeErr[id]; ok {
+		return err
+	}
+	f.removedIDs = append(f.removedIDs, id)
+	// Mirror docker's force-remove semantics: drop the container from
+	// future List results so a subsequent Create with the same name
+	// doesn't trip the conflict guard.
+	kept := f.listResults[:0]
+	for _, c := range f.listResults {
+		if c.ID != id {
+			kept = append(kept, c)
+		}
+	}
+	f.listResults = kept
 	return nil
 }
 
@@ -267,6 +291,14 @@ func (f *fakeOps) starts() []string {
 	defer f.mu.Unlock()
 	out := make([]string, len(f.startedIDs))
 	copy(out, f.startedIDs)
+	return out
+}
+
+func (f *fakeOps) removes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.removedIDs))
+	copy(out, f.removedIDs)
 	return out
 }
 
@@ -974,6 +1006,161 @@ func TestRun_F45_OperatorLabelsReachSpec(t *testing.T) {
 	}
 	if got["anchord.managed-by"] != "f45" {
 		t.Errorf("built-in anchord.managed-by=f45 must win over operator override, got %q", got["anchord.managed-by"])
+	}
+
+	cancel()
+	<-done
+}
+
+// Issue #5: pure unit test for the stale-netns predicate.
+func TestSATargetsStaleNetns(t *testing.T) {
+	target := ContainerInfo{ID: "new-tgt-7d6c738d", Names: []string{"/ak-outpost-ldap"}}
+	other := ContainerInfo{ID: "old-tgt-0f98a101", Names: []string{"/old-ak-outpost-ldap"}}
+	cases := []struct {
+		name      string
+		saNetMode string
+		all       []ContainerInfo
+		want      bool
+	}{
+		{
+			name:      "ref resolves to current target by full ID",
+			saNetMode: "container:new-tgt-7d6c738d",
+			all:       []ContainerInfo{target},
+			want:      false,
+		},
+		{
+			name:      "ref resolves to current target by name",
+			saNetMode: "container:ak-outpost-ldap",
+			all:       []ContainerInfo{target},
+			want:      false,
+		},
+		{
+			name:      "ref resolves to a different (still-listed) container",
+			saNetMode: "container:old-tgt-0f98a101",
+			all:       []ContainerInfo{target, other},
+			want:      true,
+		},
+		{
+			name:      "ref doesn't resolve at all (dead netns)",
+			saNetMode: "container:old-tgt-0f98a101",
+			all:       []ContainerInfo{target},
+			want:      true,
+		},
+		{
+			name:      "ref is a 12-char short-ID prefix of the current target",
+			saNetMode: "container:new-tgt-7d6c",
+			all:       []ContainerInfo{target},
+			want:      false,
+		},
+		{
+			name:      "non-container netmode is not our concern",
+			saNetMode: "bridge",
+			all:       []ContainerInfo{target},
+			want:      false,
+		},
+		{
+			name:      "empty netmode tolerated",
+			saNetMode: "",
+			all:       []ContainerInfo{target},
+			want:      false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sa := ContainerInfo{ID: "sa-id", Names: []string{"/ldap-service-anchor"}, NetworkMode: tc.saNetMode}
+			if got := saTargetsStaleNetns(sa, target, tc.all); got != tc.want {
+				t.Errorf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Issue #5: when an outside orchestrator recreates the F-45 target,
+// the next start-event must cause anchord to force-remove the stale
+// SA and create a new one bound to the live target's netns.
+func TestRun_F45_RecreatesSAOnStaleNetns(t *testing.T) {
+	newTarget := ContainerInfo{
+		ID:    "new-tgt-7d6c738d",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	staleSA := ContainerInfo{
+		ID:          "stale-sa-id",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:old-tgt-0f98a101", // dead reference
+	}
+	ops := newFakeOps([]ContainerInfo{newTarget, staleSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "fresh-sa-id"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	ops.eventCh <- EventMsg{Action: "start", ActorID: newTarget.ID, ActorName: "ak-outpost-ldap"}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(ops.removes()) >= 1 && len(ops.createdSpecs()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if rm := ops.removes(); len(rm) != 1 || rm[0] != "stale-sa-id" {
+		t.Errorf("expected stale SA to be removed exactly once, got %v", rm)
+	}
+	specs := ops.createdSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 Create after stale-netns recreate, got %d", len(specs))
+	}
+	if specs[0].NetworkMode != "container:ak-outpost-ldap" {
+		t.Errorf("recreate must bind to current target name, got %q", specs[0].NetworkMode)
+	}
+
+	cancel()
+	<-done
+}
+
+// Issue #5 inverse: when the SA's netns reference IS the current
+// target, the watcher must NOT touch it. Guards against a regression
+// where every start event causes a churning recreate.
+func TestRun_F45_NoRecreateWhenSANetnsCurrent(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-current",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	freshSA := ContainerInfo{
+		ID:          "sa-id",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:tgt-current",
+	}
+	ops := newFakeOps([]ContainerInfo{target, freshSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	ops.eventCh <- EventMsg{Action: "start", ActorID: target.ID, ActorName: "ak-outpost-ldap"}
+	time.Sleep(80 * time.Millisecond)
+
+	if rm := ops.removes(); len(rm) != 0 {
+		t.Errorf("healthy SA must not be removed, got %v", rm)
+	}
+	if specs := ops.createdSpecs(); len(specs) != 0 {
+		t.Errorf("healthy SA must not be recreated, got %d", len(specs))
 	}
 
 	cancel()
