@@ -234,7 +234,7 @@ func runNetworkAnchor(ctx context.Context) error {
 			pinV6 = ip
 		}
 	}
-	extRoute := extroute.New(cli, cfg.ExtNetwork, pinV4, pinV6, 0)
+	extRoute := extroute.New(cli, cfg.ExtNetwork, pinV4, pinV6, dhcpSup.Routers(), 0)
 	go func() {
 		if err := extRoute.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
 			slog.Error("extroute exited", "err", err)

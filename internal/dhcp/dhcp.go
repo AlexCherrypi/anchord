@@ -63,6 +63,12 @@ type Supervisor struct {
 	backoffMax time.Duration
 
 	currentIP chan net.IP
+	// routers carries the DHCP-Option-3 "Router" IP from each
+	// successful v4 lease. internal/extroute consumes this and
+	// installs it as the network-anchor's default route (issue #6).
+	// Buffered so a slow consumer never blocks the DHCP loop;
+	// extroute is idempotent on duplicate values anyway.
+	routers chan net.IP
 }
 
 // New constructs a Supervisor. iface is the in-container name of the
@@ -76,6 +82,7 @@ func New(mode config.AddressMode, iface, hostname string, backoffMax time.Durati
 		hostname:   hostname,
 		backoffMax: backoffMax,
 		currentIP:  make(chan net.IP, 8),
+		routers:    make(chan net.IP, 4),
 	}
 }
 
@@ -85,6 +92,15 @@ func New(mode config.AddressMode, iface, hostname string, backoffMax time.Durati
 // arriving via Docker, in dhcp-refresh it's either the bootstrap IP
 // or the leased one (whichever the watcher samples first).
 func (s *Supervisor) IPs() <-chan net.IP { return s.currentIP }
+
+// Routers returns a channel that emits the DHCP-Option-3 "Router" IP
+// from each successful v4 lease (issue #6). internal/extroute is the
+// consumer; the DHCP path no longer installs the default route
+// itself, so the channel is the only handoff. Returns nil never
+// (the channel is created at New time); a nil receive just means
+// no lease has provided a router yet. Buffered so this side never
+// blocks if extroute is slow.
+func (s *Supervisor) Routers() <-chan net.IP { return s.routers }
 
 // Run blocks until ctx is cancelled. Always runs the IP watcher; only
 // runs DHCP clients in dhcp-refresh mode.
@@ -334,17 +350,17 @@ func (s *Supervisor) applyV4Lease(ack *dhcpv4.DHCPv4) error {
 		}
 	}
 
-	// Default route via the DHCP-provided gateway, if any.
+	// Hand DHCP-Option-3 off to extroute as the default-route source
+	// (issue #6 — single source of truth for the default route lives
+	// in internal/extroute; dhcp's only job is to feed the gateway
+	// upstream). Non-blocking: if extroute hasn't drained yet, drop
+	// — extroute will see the next lease/renewal and is idempotent
+	// on duplicate values.
 	routers := ack.Router()
 	if len(routers) > 0 {
-		gw := routers[0]
-		// Replace any existing default route on this iface.
-		if err := netlink.RouteReplace(&netlink.Route{
-			LinkIndex: link.Attrs().Index,
-			Gw:        gw,
-			Dst:       nil, // 0.0.0.0/0
-		}); err != nil {
-			return fmt.Errorf("default route via %s: %w", gw, err)
+		select {
+		case s.routers <- routers[0]:
+		default:
 		}
 	}
 	return nil

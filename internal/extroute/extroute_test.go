@@ -66,8 +66,6 @@ func (r *fakeRouter) ReplaceDefaultRoute(family int, gw net.IP) error {
 		return r.replaceErr
 	}
 	r.replaceCalls = append(r.replaceCalls, replaceCall{family: family, gw: gw})
-	// Mirror kernel behaviour: replace updates the current default
-	// gateway so subsequent assert calls see the new value.
 	if family == unix.AF_INET {
 		r.currentV4 = gw
 	} else {
@@ -84,182 +82,269 @@ func (r *fakeRouter) replaces() []replaceCall {
 	return out
 }
 
-func TestRun_ReplacesBridgeDefaultWithMacvlan(t *testing.T) {
-	insp := &fakeInspector{v4: net.IPv4(192, 168, 150, 1)}
-	rt := &fakeRouter{currentV4: net.IPv4(172, 30, 0, 1)} // Docker bridge default
-	m := NewWithDeps("dmz_macvlan", nil, nil, 10*time.Millisecond, insp, rt)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = m.Run(ctx); close(done) }()
-
-	// One assert must happen before the first tick. 50ms is plenty.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
-
-	calls := rt.replaces()
-	if len(calls) < 1 {
-		t.Fatalf("expected at least 1 ReplaceDefaultRoute call, got 0")
+// waitForReplaces busy-waits up to `deadline` until rt.replaces() has
+// at least `n` entries. Lets the loop ginish a tick cleanly before
+// we assert. Returns the snapshot at the moment the condition held.
+func waitForReplaces(rt *fakeRouter, n int, deadline time.Duration) []replaceCall {
+	stop := time.Now().Add(deadline)
+	for time.Now().Before(stop) {
+		if calls := rt.replaces(); len(calls) >= n {
+			return calls
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	if !calls[0].gw.Equal(net.IPv4(192, 168, 150, 1)) || calls[0].family != unix.AF_INET {
-		t.Errorf("first replace = %+v, want v4 192.168.150.1", calls[0])
-	}
+	return rt.replaces()
 }
 
-// When the current default already points at the macvlan gateway,
-// assert must NOT call ReplaceDefaultRoute. Guards against churn on
-// every tick of the periodic re-assert loop.
-func TestRun_NoReplaceWhenAlreadyCorrect(t *testing.T) {
+// Prio 3 (IPAM fallback): no pin, no DHCP — IPAM gateway is taken
+// as the default-route source. This is the bootstrap-mode path.
+func TestRun_IPAMFallbackWhenNoPinNoDHCP(t *testing.T) {
 	insp := &fakeInspector{v4: net.IPv4(192, 168, 150, 1)}
-	rt := &fakeRouter{currentV4: net.IPv4(192, 168, 150, 1)} // already correct
-	m := NewWithDeps("dmz_macvlan", nil, nil, 10*time.Millisecond, insp, rt)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = m.Run(ctx); close(done) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
-
-	if calls := rt.replaces(); len(calls) != 0 {
-		t.Errorf("expected 0 ReplaceDefaultRoute calls when default already correct, got %d (%+v)", len(calls), calls)
-	}
-}
-
-// Operator-pinned ANCHORD_EXT_GATEWAY_IP must skip the Docker inspect
-// path entirely. Use case: external macvlan networks whose IPAM
-// config Docker can't read.
-func TestRun_PinnedGatewaySkipsInspect(t *testing.T) {
-	insp := &fakeInspector{}
 	rt := &fakeRouter{currentV4: net.IPv4(172, 30, 0, 1)}
-	m := NewWithDeps("", net.IPv4(192, 168, 150, 1), nil, 10*time.Millisecond, insp, rt)
+	m := NewWithDeps("dmz_macvlan", nil, nil, nil, 10*time.Millisecond, insp, rt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = m.Run(ctx); close(done) }()
-	time.Sleep(50 * time.Millisecond)
+	calls := waitForReplaces(rt, 1, 200*time.Millisecond)
+	cancel()
+	<-done
+
+	if len(calls) < 1 || !calls[0].gw.Equal(net.IPv4(192, 168, 150, 1)) || calls[0].family != unix.AF_INET {
+		t.Errorf("expected IPAM v4 gateway as fallback, got %+v", calls)
+	}
+}
+
+// Prio 2 (pin > IPAM): when both are present, pin wins. Plus the
+// inspect MUST be skipped to save the Docker round-trip when both
+// pin slots are set.
+func TestRun_PinWinsOverIPAM(t *testing.T) {
+	insp := &fakeInspector{v4: net.IPv4(192, 168, 150, 1)}
+	rt := &fakeRouter{currentV4: net.IPv4(172, 30, 0, 1)}
+	m := NewWithDeps("dmz_macvlan",
+		net.IPv4(10, 200, 0, 1), // pin v4
+		net.ParseIP("fd00::1"),  // pin v6
+		nil, 10*time.Millisecond, insp, rt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = m.Run(ctx); close(done) }()
+	calls := waitForReplaces(rt, 1, 200*time.Millisecond)
 	cancel()
 	<-done
 
 	if insp.calls != 0 {
-		t.Errorf("expected 0 Docker inspect calls when gateway pinned, got %d", insp.calls)
+		t.Errorf("inspect must be skipped when both v4 and v6 pins are set, got %d", insp.calls)
 	}
-	if calls := rt.replaces(); len(calls) != 1 || !calls[0].gw.Equal(net.IPv4(192, 168, 150, 1)) {
-		t.Errorf("expected pin to drive 1 replace to 192.168.150.1, got %+v", calls)
+	if len(calls) < 1 || !calls[0].gw.Equal(net.IPv4(10, 200, 0, 1)) {
+		t.Errorf("expected pin to win, got %+v", calls)
 	}
 }
 
-// Dual-stack: a v4+v6 inspect result must produce one replace per
-// family, both with the resolved gateways.
-func TestRun_DualStack(t *testing.T) {
-	insp := &fakeInspector{
-		v4: net.IPv4(192, 168, 150, 1),
-		v6: net.ParseIP("fd96:0150::1"),
-	}
-	rt := &fakeRouter{
-		currentV4: net.IPv4(172, 30, 0, 1),
-		currentV6: net.ParseIP("fd00:1070::1"),
-	}
-	m := NewWithDeps("dmz_macvlan", nil, nil, 10*time.Millisecond, insp, rt)
+// Pin v4 only + IPAM v6 only: each family takes its respective
+// source. The mixed-source case is supported (unlike the previous
+// either/or implementation).
+func TestRun_PinV4_IPAMv6_MixedSource(t *testing.T) {
+	insp := &fakeInspector{v6: net.ParseIP("fd96:0150::1")}
+	rt := &fakeRouter{}
+	m := NewWithDeps("dmz_macvlan",
+		net.IPv4(192, 168, 150, 1), nil,
+		nil, 10*time.Millisecond, insp, rt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = m.Run(ctx); close(done) }()
-	time.Sleep(50 * time.Millisecond)
+	calls := waitForReplaces(rt, 2, 200*time.Millisecond)
 	cancel()
 	<-done
 
-	calls := rt.replaces()
-	var sawV4, sawV6 bool
+	var sawV4Pin, sawV6Ipam bool
 	for _, c := range calls {
 		if c.family == unix.AF_INET && c.gw.Equal(net.IPv4(192, 168, 150, 1)) {
-			sawV4 = true
+			sawV4Pin = true
 		}
 		if c.family == unix.AF_INET6 && c.gw.Equal(net.ParseIP("fd96:0150::1")) {
-			sawV6 = true
+			sawV6Ipam = true
 		}
 	}
-	if !sawV4 || !sawV6 {
-		t.Errorf("expected one v4 + one v6 replace, got %+v", calls)
+	if !sawV4Pin || !sawV6Ipam {
+		t.Errorf("expected v4-from-pin + v6-from-IPAM, got %+v", calls)
 	}
 }
 
-// No ExtNetwork + no pin → manager is a documented no-op that waits
-// for ctx without touching netlink. Used by single-network anchord
-// deployments where there's nothing to enforce.
-func TestRun_NoExtNetworkNoPin_IsNoop(t *testing.T) {
+// Prio 1 (DHCP > pin > IPAM): a value pushed onto the dynamic source
+// channel overrides both pin and IPAM for v4. v6 stays on its prior
+// source (no DHCPv6 Option-3 equivalent).
+func TestRun_DHCPDynamicOverridesPinAndIPAM(t *testing.T) {
+	insp := &fakeInspector{v4: net.IPv4(192, 168, 150, 1)} // would be IPAM fallback
+	rt := &fakeRouter{currentV4: net.IPv4(172, 30, 0, 1)}
+	ch := make(chan net.IP, 2)
+
+	m := NewWithDeps("dmz_macvlan",
+		net.IPv4(10, 200, 0, 1), nil, // pin v4 only
+		ch, 10*time.Millisecond, insp, rt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = m.Run(ctx); close(done) }()
+
+	// First assert: pin wins (DHCP hasn't pushed yet).
+	calls := waitForReplaces(rt, 1, 200*time.Millisecond)
+	if len(calls) < 1 || !calls[0].gw.Equal(net.IPv4(10, 200, 0, 1)) {
+		t.Fatalf("expected pin to win pre-DHCP, got %+v", calls)
+	}
+
+	// DHCP pushes Option 3 — must override.
+	ch <- net.IPv4(192, 168, 150, 254)
+
+	calls = waitForReplaces(rt, 2, 200*time.Millisecond)
+	cancel()
+	<-done
+
+	gotDHCP := false
+	for _, c := range calls {
+		if c.family == unix.AF_INET && c.gw.Equal(net.IPv4(192, 168, 150, 254)) {
+			gotDHCP = true
+		}
+	}
+	if !gotDHCP {
+		t.Errorf("expected DHCP gateway to override after push, got %+v", calls)
+	}
+}
+
+// When DHCP pushes the same value twice (typical of lease renewals
+// returning the same Router option), no churn — the second push must
+// not trigger another replace.
+func TestRun_DHCPRenewalSameValueNoChurn(t *testing.T) {
 	insp := &fakeInspector{}
 	rt := &fakeRouter{}
-	m := NewWithDeps("", nil, nil, 10*time.Millisecond, insp, rt)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = m.Run(ctx); close(done) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
-
-	if insp.calls != 0 {
-		t.Errorf("inspect must not be called with empty ExtNetwork, got %d", insp.calls)
-	}
-	if calls := rt.replaces(); len(calls) != 0 {
-		t.Errorf("router must not be touched with empty ExtNetwork, got %+v", calls)
-	}
-}
-
-// Inspect failure → enforcement disabled but Run blocks until ctx is
-// cancelled. Anchord must keep running; this is QoL, not a hard dep.
-func TestRun_InspectErrorDoesNotKillRun(t *testing.T) {
-	insp := &fakeInspector{err: errors.New("docker unreachable")}
-	rt := &fakeRouter{}
-	m := NewWithDeps("dmz_macvlan", nil, nil, 10*time.Millisecond, insp, rt)
+	ch := make(chan net.IP, 4)
+	m := NewWithDeps("", nil, nil, ch, 50*time.Millisecond, insp, rt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = m.Run(ctx); close(done) }()
 
-	select {
-	case <-done:
-		t.Fatal("Run returned before ctx cancel — inspect error must not kill the loop")
-	case <-time.After(40 * time.Millisecond):
-	}
-	cancel()
-	<-done
-
-	if calls := rt.replaces(); len(calls) != 0 {
-		t.Errorf("no router calls expected when inspect fails, got %+v", calls)
-	}
-}
-
-// Periodic re-assert: an external party (Docker, operator) flips the
-// default back to a bridge. The next tick must restore it.
-func TestRun_ReAssertsOnExternalRevert(t *testing.T) {
-	insp := &fakeInspector{v4: net.IPv4(192, 168, 150, 1)}
-	rt := &fakeRouter{currentV4: net.IPv4(172, 30, 0, 1)}
-	m := NewWithDeps("dmz_macvlan", nil, nil, 20*time.Millisecond, insp, rt)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = m.Run(ctx); close(done) }()
-
-	// Wait for the first replace (initial assert).
-	time.Sleep(30 * time.Millisecond)
-	if len(rt.replaces()) < 1 {
-		t.Fatalf("expected initial assert before tick")
+	ch <- net.IPv4(192, 168, 150, 1)
+	calls1 := waitForReplaces(rt, 1, 200*time.Millisecond)
+	if len(calls1) != 1 {
+		t.Fatalf("first push must install: got %+v", calls1)
 	}
 
-	// Simulate Docker / operator flipping the default back.
-	rt.mu.Lock()
-	rt.currentV4 = net.IPv4(172, 30, 0, 1)
-	rt.mu.Unlock()
-
-	// Wait for at least one tick.
+	// Renewal — same value. Wait a bit, no new replace must fire.
+	ch <- net.IPv4(192, 168, 150, 1)
 	time.Sleep(60 * time.Millisecond)
 	cancel()
 	<-done
 
-	if calls := rt.replaces(); len(calls) < 2 {
-		t.Errorf("expected re-assert after external revert, got %d total replaces (%+v)", len(calls), calls)
+	if got := len(rt.replaces()); got != 1 {
+		t.Errorf("renewal with same value must not churn, got %d replaces (%+v)", got, rt.replaces())
+	}
+}
+
+// DHCP closes the channel mid-flight (graceful supervisor shutdown
+// before manager's ctx cancel). Manager must keep ticking with the
+// last-known-good dynV4 — the closed channel must NOT degrade to
+// pin/IPAM (DHCP-supplied is still the most authoritative value we
+// have for this process lifetime, even after the source has gone
+// quiet).
+func TestRun_DHCPChannelClosedKeepsLastValue(t *testing.T) {
+	insp := &fakeInspector{}
+	rt := &fakeRouter{}
+	ch := make(chan net.IP, 2)
+	m := NewWithDeps("",
+		net.IPv4(10, 200, 0, 1), nil, // pin should be ignored once DHCP spoke
+		ch, 10*time.Millisecond, insp, rt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = m.Run(ctx); close(done) }()
+
+	ch <- net.IPv4(192, 168, 150, 1)
+	// Wait until the DHCP push has been processed (replace happened).
+	waitForReplaces(rt, 2, 200*time.Millisecond) // 1 pin-startup + 1 dhcp-push
+
+	// Snapshot replace-count at the moment we close the channel.
+	preClose := len(rt.replaces())
+	close(ch)
+	time.Sleep(50 * time.Millisecond) // let several ticks elapse
+	cancel()
+	<-done
+
+	post := rt.replaces()[preClose:]
+	for _, c := range post {
+		if c.family == unix.AF_INET && c.gw.Equal(net.IPv4(10, 200, 0, 1)) {
+			t.Errorf("after DHCP closed, manager fell back to pin; got %v in post-close replaces %+v", c.gw, post)
+		}
+	}
+}
+
+// Prio 4 (nothing): no pin, no DHCP channel push, IPAM lookup empty.
+// Manager must be a quiet no-op — no router writes — but the loop
+// must keep running (so a later DHCP push would still be honoured).
+func TestRun_NothingResolved_QuietNoop(t *testing.T) {
+	insp := &fakeInspector{} // both v4/v6 nil, no error
+	rt := &fakeRouter{}
+	ch := make(chan net.IP)
+	m := NewWithDeps("dmz_macvlan", nil, nil, ch, 10*time.Millisecond, insp, rt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = m.Run(ctx); close(done) }()
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+	<-done
+
+	if calls := rt.replaces(); len(calls) != 0 {
+		t.Errorf("expected no router writes with nothing resolved, got %+v", calls)
+	}
+}
+
+// IPAM lookup error: enforcement falls back to pin (if any), loop
+// keeps running. Same robustness contract as before.
+func TestRun_IPAMErrorFallsBackToPin(t *testing.T) {
+	insp := &fakeInspector{err: errors.New("docker unreachable")}
+	rt := &fakeRouter{}
+	m := NewWithDeps("dmz_macvlan",
+		net.IPv4(10, 200, 0, 1), nil,
+		nil, 10*time.Millisecond, insp, rt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = m.Run(ctx); close(done) }()
+	calls := waitForReplaces(rt, 1, 200*time.Millisecond)
+	cancel()
+	<-done
+
+	if len(calls) < 1 || !calls[0].gw.Equal(net.IPv4(10, 200, 0, 1)) {
+		t.Errorf("expected pin fallback when IPAM errors, got %+v", calls)
+	}
+}
+
+// Periodic re-assert: external party (Docker, operator) flips the
+// default back to a bridge. Next tick restores the effective gateway
+// — pin/IPAM/DHCP source unchanged.
+func TestRun_ReAssertsOnExternalRevert(t *testing.T) {
+	insp := &fakeInspector{v4: net.IPv4(192, 168, 150, 1)}
+	rt := &fakeRouter{currentV4: net.IPv4(172, 30, 0, 1)}
+	m := NewWithDeps("dmz_macvlan", nil, nil, nil, 20*time.Millisecond, insp, rt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = m.Run(ctx); close(done) }()
+
+	waitForReplaces(rt, 1, 100*time.Millisecond)
+
+	// Simulate Docker / operator flipping the default.
+	rt.mu.Lock()
+	rt.currentV4 = net.IPv4(172, 30, 0, 1)
+	rt.mu.Unlock()
+
+	calls := waitForReplaces(rt, 2, 200*time.Millisecond)
+	cancel()
+	<-done
+
+	if len(calls) < 2 {
+		t.Errorf("expected re-assert after external revert, got %d (%+v)", len(calls), calls)
 	}
 }

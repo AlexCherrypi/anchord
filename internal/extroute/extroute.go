@@ -11,16 +11,29 @@
 // long-lived TCP sessions (IMAP IDLE etc.) die at the TCP RTO
 // terminal point after ~17 minutes.
 //
+// Source priority (highest first):
+//
+//   1. DHCP Option 3 — pushed onto the dynamic channel by
+//      internal/dhcp's lease-apply path. Wins forever once it
+//      arrives; the DHCP server is the L3 authority for its subnet.
+//   2. ANCHORD_EXT_GATEWAY_IP — operator pin. Used before DHCP has
+//      delivered, or when address-mode is bootstrap/slaac-ra-only.
+//   3. NetworkInspect(ExtNetwork).IPAM.Config[].Gateway — Docker-
+//      side static fallback. Used when neither DHCP nor pin set.
+//   4. Nothing — no default route from this manager.
+//
 // Loop:
 //
-//   1. Resolve the macvlan gateway. Operator pin via
-//      ANCHORD_EXT_GATEWAY_IP wins; otherwise read from Docker
-//      NetworkInspect(ExtNetwork).IPAM.Config[].Gateway.
+//   1. Resolve initial gateways: pin first; if missing, NetworkInspect.
 //   2. RouteReplace default via <gw> for each family that resolved.
 //   3. Every InsistInterval: re-assert. Cheap (one netlink list).
 //      Re-installs if anything (Docker restart of a sibling, manual
 //      operator intervention) flipped the default back to a bridge.
-//   4. ctx cancellation returns without touching the route — Docker
+//   4. On each dynamic-source push: replace the effective v4 gateway
+//      with the DHCP-supplied value, re-assert immediately. (v6
+//      stays static — DHCPv6 has no Option 3 equivalent; the kernel
+//      handles IPv6 default routing via Router Advertisements.)
+//   5. ctx cancellation returns without touching the route — Docker
 //      handles netns teardown on container exit; the kernel reaps the
 //      route automatically. No restore step (unlike serviceanchor's
 //      F-29 wrap-restore) because there's nothing useful to restore:
@@ -33,6 +46,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/network"
@@ -52,9 +66,18 @@ type Manager struct {
 	pinV4      net.IP
 	pinV6      net.IP
 	interval   time.Duration
+	// dynSrc is the optional DHCP-Option-3 channel from
+	// internal/dhcp's lease-apply path. nil for non-dhcp-refresh
+	// modes — a nil channel is never ready in select, so the loop
+	// just sticks to pin/IPAM in that case.
+	dynSrc <-chan net.IP
 
 	inspect networkInspector
 	router  Router
+
+	mu             sync.Mutex
+	ipamV4, ipamV6 net.IP // resolved once at startup if extNetwork set
+	dynV4          net.IP // latest DHCP-Option-3 push; wins over pin/ipam
 }
 
 // Router is the netlink surface this package uses. Mockable for tests.
@@ -76,10 +99,11 @@ type networkInspector interface {
 
 // New constructs a Manager wired to the live Docker client and
 // vishvananda/netlink. extNetwork is ANCHORD_EXT_NETWORK; pinV4 and
-// pinV6 are the operator's optional ANCHORD_EXT_GATEWAY_IP override
-// (either may be nil to leave that family's gateway to inspection).
-// interval=0 falls back to DefaultInsistInterval.
-func New(cli *client.Client, extNetwork string, pinV4, pinV6 net.IP, interval time.Duration) *Manager {
+// pinV6 are the operator's optional ANCHORD_EXT_GATEWAY_IP override.
+// dynSrc is the DHCP-Option-3 channel (typically dhcp.Supervisor.Routers());
+// pass nil for non-dhcp-refresh deployments. interval=0 falls back
+// to DefaultInsistInterval.
+func New(cli *client.Client, extNetwork string, pinV4, pinV6 net.IP, dynSrc <-chan net.IP, interval time.Duration) *Manager {
 	if interval <= 0 {
 		interval = DefaultInsistInterval
 	}
@@ -87,6 +111,7 @@ func New(cli *client.Client, extNetwork string, pinV4, pinV6 net.IP, interval ti
 		extNetwork: extNetwork,
 		pinV4:      pinV4,
 		pinV6:      pinV6,
+		dynSrc:     dynSrc,
 		interval:   interval,
 		inspect:    dockerInspector{cli: cli},
 		router:     netlinkRouter{},
@@ -94,7 +119,7 @@ func New(cli *client.Client, extNetwork string, pinV4, pinV6 net.IP, interval ti
 }
 
 // NewWithDeps is the test constructor.
-func NewWithDeps(extNetwork string, pinV4, pinV6 net.IP, interval time.Duration, inspect networkInspector, router Router) *Manager {
+func NewWithDeps(extNetwork string, pinV4, pinV6 net.IP, dynSrc <-chan net.IP, interval time.Duration, inspect networkInspector, router Router) *Manager {
 	if interval <= 0 {
 		interval = DefaultInsistInterval
 	}
@@ -102,44 +127,46 @@ func NewWithDeps(extNetwork string, pinV4, pinV6 net.IP, interval time.Duration,
 		extNetwork: extNetwork,
 		pinV4:      pinV4,
 		pinV6:      pinV6,
+		dynSrc:     dynSrc,
 		interval:   interval,
 		inspect:    inspect,
 		router:     router,
 	}
 }
 
-// Run blocks until ctx is cancelled. Resolves the macvlan gateway
-// once at startup, asserts the default route, then re-asserts on
-// each tick. Returns ctx.Err() — typically context.Canceled, which
-// the caller treats as a clean exit.
+// Run blocks until ctx is cancelled. Resolves the initial fallback
+// gateways (pin > IPAM) at startup, asserts the effective default
+// route, then on every tick OR every dynamic-source push re-asserts.
+// Returns ctx.Err() — typically context.Canceled.
 //
-// Skips silently (waits for ctx) when no gateway is resolvable: an
-// empty ExtNetwork without an operator pin, or a NetworkInspect
-// failure on the resolved network. Default-route enforcement is a
-// quality-of-life feature; we don't kill the data plane over it.
+// Loop never bails: even when no gateway is resolvable at startup,
+// the loop still ticks so a DHCP-Option-3 push that arrives later
+// gets honoured. Enforcement is a QoL feature; failures here don't
+// kill the data plane.
 func (m *Manager) Run(ctx context.Context) error {
-	gwV4, gwV6, err := m.resolveGateways(ctx)
-	if err != nil {
-		slog.Warn("ext default-route enforcement disabled — gateway not resolved",
-			"ext_network", m.extNetwork, "err", err)
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	if gwV4 == nil && gwV6 == nil {
-		slog.Info("ext default-route enforcement skipped — no gateway available",
-			"ext_network", m.extNetwork)
-		<-ctx.Done()
-		return ctx.Err()
+	// Startup IPAM lookup — only if there's an ext_network and at
+	// least one family lacks a pin. (Pin always wins over IPAM, so
+	// skipping the lookup when both pins are set saves one Docker
+	// round-trip.)
+	if m.extNetwork != "" && (m.pinV4 == nil || m.pinV6 == nil) {
+		ipamV4, ipamV6, err := m.inspect.Gateways(ctx, m.extNetwork)
+		if err != nil {
+			slog.Warn("ext IPAM lookup failed; will fall back to pin / DHCP only",
+				"ext_network", m.extNetwork, "err", err)
+		} else {
+			m.mu.Lock()
+			m.ipamV4, m.ipamV6 = ipamV4, ipamV6
+			m.mu.Unlock()
+		}
 	}
 
 	slog.Info("ext default-route enforcer starting",
 		"ext_network", m.extNetwork,
-		"gw_v4", gwV4,
-		"gw_v6", gwV6,
+		"pin_v4", m.pinV4, "pin_v6", m.pinV6,
+		"ipam_v4", m.ipamV4, "ipam_v6", m.ipamV6,
 		"interval", m.interval)
 
-	m.assert(unix.AF_INET, gwV4)
-	m.assert(unix.AF_INET6, gwV6)
+	m.assertAll()
 
 	t := time.NewTicker(m.interval)
 	defer t.Stop()
@@ -148,25 +175,59 @@ func (m *Manager) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			m.assert(unix.AF_INET, gwV4)
-			m.assert(unix.AF_INET6, gwV6)
+			m.assertAll()
+		case gw, ok := <-m.dynSrc:
+			if !ok {
+				// dhcp closed the channel — disable dynamic source
+				// and keep ticking with pin/IPAM.
+				m.dynSrc = nil
+				continue
+			}
+			if gw == nil || gw.To4() == nil {
+				continue
+			}
+			m.mu.Lock()
+			changed := !gw.To4().Equal(m.dynV4)
+			m.dynV4 = gw.To4()
+			m.mu.Unlock()
+			if changed {
+				slog.Info("ext default-route dynamic source updated",
+					"family", "v4", "gw", gw)
+			}
+			m.assert(unix.AF_INET, m.effectiveV4())
 		}
 	}
 }
 
-// resolveGateways picks the per-family gateway address: operator pin
-// wins; otherwise NetworkInspect on the macvlan network.
-func (m *Manager) resolveGateways(ctx context.Context) (v4, v6 net.IP, err error) {
-	if m.pinV4 != nil || m.pinV6 != nil {
-		// Mixed pin / inspect is not supported: if the operator pinned
-		// either family, treat the other as deliberately unset. Same
-		// rule as the service-anchor's ANCHORD_GATEWAY_IP.
-		return m.pinV4, m.pinV6, nil
+// effectiveV4 picks the active v4 gateway by priority: dynamic > pin > IPAM.
+func (m *Manager) effectiveV4() net.IP {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case m.dynV4 != nil:
+		return m.dynV4
+	case m.pinV4 != nil:
+		return m.pinV4
+	default:
+		return m.ipamV4
 	}
-	if m.extNetwork == "" {
-		return nil, nil, errors.New("ANCHORD_EXT_NETWORK empty and no ANCHORD_EXT_GATEWAY_IP set")
+}
+
+// effectiveV6 picks the active v6 gateway: pin > IPAM. No dynamic
+// source for IPv6 — DHCPv6 has no Option 3 equivalent.
+func (m *Manager) effectiveV6() net.IP {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pinV6 != nil {
+		return m.pinV6
 	}
-	return m.inspect.Gateways(ctx, m.extNetwork)
+	return m.ipamV6
+}
+
+// assertAll re-asserts both families.
+func (m *Manager) assertAll() {
+	m.assert(unix.AF_INET, m.effectiveV4())
+	m.assert(unix.AF_INET6, m.effectiveV6())
 }
 
 // assert installs the default route via gw for the given family,
