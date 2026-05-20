@@ -8,11 +8,14 @@
 
 > One IP per Compose project. No subnet bookkeeping. Real client source IPs.
 
-> **Status (2026-05-18):** v2 has landed on `main`. The network-anchor now
-> joins an existing Docker macvlan network (`external: true`) instead of
-> creating one itself; it can refresh its assigned IPv4 via DHCP at runtime
-> (`ANCHORD_ADDRESS_MODE=dhcp-refresh`) or just keep the Docker-assigned
-> bootstrap IP. See [SPEC-v2-DRAFT.md](SPEC-v2-DRAFT.md) for the deltas.
+> **Status (2026-05-20):** in production on a small self-hosted fleet
+> (TrueNAS SCALE host, 6+ Compose stacks, ~14 service-anchors —
+> Mailcow, Authentik, Nextcloud-AIO, Traefik, …). v2 has shipped;
+> v2.x deltas (F-41 through F-46) cover the wrap-pattern,
+> label-selector discovery, runtime-spawned managed service-anchors,
+> port-translating DNAT, and authoritative default-route handling
+> via DHCP Option 3. See [SPEC-v2-DRAFT.md](SPEC-v2-DRAFT.md) plus
+> the per-feature `SPEC-*-DRAFT.md` files for the contracts.
 
 **Built for self-hosted, homelab, and small-fleet workloads** that want
 classical "one server, one service" semantics — Mailcow, Nextcloud,
@@ -32,16 +35,50 @@ on another, and so on — but with the operational ergonomics of Compose.
 
 ## Status
 
-**Beta, feature-complete.** Both modes implemented, observability
-(metrics + health) wired in. 167/167 across unit tests + e2e covering
-all four DHCP scenarios plus stateful DHCPv6 (the auto-generated
-report at the bottom of this README is the release-readiness signal).
-One thing outstanding before a v1 tag: real-host validation on a
-Linux box with a physical VLAN sub-interface — to confirm the Docker
-Desktop bridge-flood workaround isn't needed in production.
+**Production.** Running on a small self-hosted fleet since 2026-05.
+Both modes implemented, full observability (metrics + health),
+comprehensive test suite (unit + integration + e2e across all DHCP
+scenarios incl. stateful DHCPv6). The pre-v1 question — "does this
+hold up on a real Linux box with a physical VLAN?" — has been
+answered by weeks of uptime under real workloads (SMTP, IMAP IDLE,
+LDAP binds, OIDC, video calls via Nextcloud Talk). The
+auto-generated report at the bottom is the release-readiness signal.
 
-*(Designed in a bathtub conversation. Has held up better than that has any
-right to.)*
+*(Designed in a bathtub conversation. Has held up better than that
+has any right to.)*
+
+### What v2.x adds on top of v2
+
+The deltas since the v2 cut-over (each lives in its own
+`SPEC-*-DRAFT.md`; the codepath is gated behind one env var):
+
+- **F-39 / F-40 — Wrap pattern.** Service-anchors that join an
+  existing app container's netns via `network_mode: container:<X>`.
+  Lets you wrap a third-party Compose project (Mailcow, AIO) without
+  touching its compose file.
+- **F-41 — Default-route authority.** The network-anchor enforces
+  its default route on the macvlan (not on a Docker bridge), with
+  priority `DHCP Option 3 > ANCHORD_EXT_GATEWAY_IP > IPAM.Config.Gateway`.
+  Eliminates the asymmetric-reply-via-host-LAN failure mode that
+  killed long-lived TCP after ~17 min.
+- **F-42 — Label-selector discovery.** Backends matched by an
+  operator-supplied label set (`anchord.identity=ldap-outpost`)
+  instead of just the Compose project. Required for runtime-spawned
+  targets (Authentik outposts, K8s-shape operators).
+- **F-43 — Sibling auto-start.** Network-anchor watches docker
+  events and starts any `Created`-state sibling whose
+  `network_mode: container:<X>` resolves to a now-running target.
+- **F-44 — Co-attachment shared-network picker.** When anchord is
+  on multiple non-EXT networks, pick the one with the most observed
+  backends — settles deterministically, never flaps.
+- **F-45 — Managed service-anchors.** Network-anchor creates and
+  rebinds the service-anchor on demand when its target is spawned
+  (or recreated) outside of Compose. Auto-recovers when an
+  orchestrator recreates the target mid-flight (stale-netns detect).
+- **F-46 — Port-translating DNAT.** `anchord.expose=tcp/636:6636`
+  rewrites the destination port at DNAT time. Lets DMZ-side
+  reservation (LDAPS on 636) meet app-side reality (Authentik
+  outpost listening on non-privileged 6636).
 
 ## The mental model
 
@@ -306,8 +343,10 @@ All via environment variables.
 | `ANCHORD_MANAGED_SA_IMAGE`   | no       | (anchord's own image) | F-45: image for the managed service-anchor. Default resolved at runtime from the network-anchor's own container inspect — keeps both containers on the same image version |
 | `ANCHORD_MANAGED_SA_GATEWAY_IP` | no    | (anchord's IP on shared network) | F-45: value passed as `ANCHORD_GATEWAY_IP` to the managed service-anchor. Default resolved at runtime from anchord's IP on whichever network the F-44 picker chose |
 | `ANCHORD_MANAGED_SA_EXTRA_ENV` | no    | `{}`               | F-45: additional env vars for the managed service-anchor, as a JSON object `{"KEY":"value",…}`. Operator overrides win against the standard `ANCHORD_*` defaults |
+| `ANCHORD_MANAGED_SA_LABELS`  | no       | `{}`               | F-45: labels to stamp on the managed service-anchor, as JSON `{"key":"value",…}`. Use case: inject `anchord.identity` / `anchord.expose` so an F-42 label-selector network-anchor can discover its own spawn. Reserved keys are rejected at load: `com.docker.compose.*` and `anchord.managed-by` |
 | `ANCHORD_ADDRESS_MODE`       | no       | `bootstrap`        | `bootstrap` (keep Docker-assigned IP), `dhcp-refresh` (DHCP-replace it), or `slaac-ra-only` (Docker-assigned v4, kernel SLAAC for v6) |
 | `ANCHORD_EXT_NETWORK`        | no       |                    | Docker network name of the external macvlan (e.g. `dmz_macvlan`). When set, anchord resolves its iface via the Docker API by MAC match. **Strongly recommended for any stack with 2+ networks** — `ANCHORD_EXT_IFACE=eth0` is a coin flip across recreates because Docker's eth0/eth1 assignment is non-deterministic |
+| `ANCHORD_EXT_GATEWAY_IP`     | no       | (auto-resolved)    | F-41: gateway IP for the default route enforced on the external iface. Comma-separated v4,v6 (same shape as service-anchor `ANCHORD_GATEWAY_IP`). Empty = read `IPAM.Config.Gateway` from `ANCHORD_EXT_NETWORK` via Docker NetworkInspect. In `dhcp-refresh` mode, DHCP Option 3 from the lease overrides both — wins forever once the first lease arrives. Pin when the macvlan is external without Docker-visible IPAM, or when you intentionally want a different gateway than DHCP/Docker would pick |
 | `ANCHORD_SHARED_NETWORK`     | no       |                    | F-44: pins the Docker network anchord uses to read backend IPs. When set, must be one of the networks anchord is attached to. Unset = heuristic mode (pick the candidate with the most backend co-attachment, ties via "transit" preference then alphabetical, re-evaluated until a backend is observed). Use when you have multiple transit-named bridges and the heuristic picks the wrong one |
 | `ANCHORD_EXT_IFACE`          | no       | `eth0`             | In-container name of the macvlan interface. Used only when `ANCHORD_EXT_NETWORK` is unset; if both are set, `ANCHORD_EXT_NETWORK` wins and a WARN is logged |
 | `ANCHORD_DHCP_HOSTNAME`      | no       | = project name     | Announced to the DHCP server in `dhcp-refresh`; also the basis of the DHCP client-id, so reservations are sticky across MAC changes |
@@ -334,8 +373,9 @@ On any container that should be exposed via the project's external IP:
 
 | Label                | Example                       | Notes |
 |----------------------|-------------------------------|-------|
-| `anchord.expose`     | `"tcp/25,tcp/465,udp/4500"`   | Comma-separated `proto/port` entries |
+| `anchord.expose`     | `"tcp/25,tcp/465,udp/4500"` or `"tcp/636:6636,udp/53:5353"` | Comma-separated entries. Each entry is `proto/port` (DNAT keeps the port) or `proto/dmz-port:backend-port` (F-46 port translation — DMZ-side reservation differs from app's listener). Backend-port omitted = same as DMZ-port |
 | `anchord.expose.v6`  | `auto` (default) / `off`      | Whether to mirror v4 rules onto AAAA |
+| `anchord.identity`   | `ldap-outpost`                | Free-form value matched by `ANCHORD_LABEL_SELECTOR` (F-42). Use when one Compose project hosts multiple anchord stacks, or when targets are spawned outside Compose and don't carry a project label |
 
 ## Building
 
@@ -402,9 +442,16 @@ body while not ready.
   Default is `anchord`, which matches the canonical service name in the
   example compose. If you rename the network-anchor service, set
   `ANCHORD_GATEWAY_HOSTNAME` on each service-anchor to match.
-- **One network-anchor per Compose project** — the design assumes per-project
-  scoping. Running multiple in the same project will race on nftables
-  tables.
+- **One network-anchor per backend identity.** Default discovery
+  scope is the Compose project; two anchords filtering the same set
+  of backends will fight over their DNAT entries. With
+  `ANCHORD_LABEL_SELECTOR` (F-42), multiple anchord stacks coexist
+  cleanly in one Compose project as long as their selectors are
+  disjoint (each backend container is matched by exactly one
+  network-anchor). Each anchord container has its own netns, so
+  the per-process `anchord_v4` / `anchord_v6` nft tables don't
+  collide at the kernel level — but the macvlan IPs and DHCP
+  reservations still need to be operator-distinct.
 
 ## License
 
