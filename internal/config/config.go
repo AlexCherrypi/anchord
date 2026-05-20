@@ -143,6 +143,17 @@ type NetworkAnchor struct {
 	// Takes precedence over ExtIfaceName. See SPEC-v2-DRAFT F-37.
 	ExtNetwork string
 
+	// ExtGatewayIP, when non-empty, is the gateway address anchord
+	// installs as its default route on the external (macvlan)
+	// interface — issue #6. Empty means "resolve at runtime from
+	// Docker NetworkInspect on ExtNetwork.IPAM.Config[].Gateway".
+	// Provide an explicit pin when the macvlan network is external
+	// to Docker (no IPAM config visible to the daemon) or when the
+	// Docker-side IPAM gateway differs from the actual L3 gateway.
+	// Accepts v4 and/or v6 separated by comma — same shape as the
+	// service-anchor's ANCHORD_GATEWAY_IP (F-40).
+	ExtGatewayIPs []net.IP
+
 	// AddressMode picks how the external IPv4 is obtained (bootstrap
 	// vs dhcp-refresh vs slaac-ra-only). Default "bootstrap".
 	AddressMode AddressMode
@@ -291,6 +302,16 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 		return nil, err
 	}
 	c.ManagedSA = managedSA
+
+	// Issue #6: optional pin for the external default-route gateway.
+	// Empty means "resolve at runtime from Docker NetworkInspect on
+	// ExtNetwork". Uses the same comma-separated v4,v6 grammar as
+	// the service-anchor's ANCHORD_GATEWAY_IP.
+	extGws, err := parseGatewayIPs(os.Getenv("ANCHORD_EXT_GATEWAY_IP"))
+	if err != nil {
+		return nil, fmt.Errorf("ANCHORD_EXT_GATEWAY_IP: %w", err)
+	}
+	c.ExtGatewayIPs = extGws
 
 	if c.ComposeProject == "" && len(c.LabelSelector) == 0 {
 		return nil, fmt.Errorf("ANCHORD_PROJECT (or COMPOSE_PROJECT_NAME) must be set unless ANCHORD_LABEL_SELECTOR is")

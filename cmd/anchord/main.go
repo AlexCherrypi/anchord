@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sort"
@@ -33,6 +34,7 @@ import (
 	"github.com/AlexCherrypi/anchord/internal/dhcp"
 	"github.com/AlexCherrypi/anchord/internal/discovery"
 	"github.com/AlexCherrypi/anchord/internal/extiface"
+	"github.com/AlexCherrypi/anchord/internal/extroute"
 	"github.com/AlexCherrypi/anchord/internal/health"
 	"github.com/AlexCherrypi/anchord/internal/metrics"
 	"github.com/AlexCherrypi/anchord/internal/nat"
@@ -216,6 +218,26 @@ func runNetworkAnchor(ctx context.Context) error {
 	// of changes happens inside the dhcp package itself.
 	go func() {
 		for range dhcpSup.IPs() {
+		}
+	}()
+
+	// Issue #6: keep the network-anchor's default route on the macvlan
+	// (external) iface — Docker's heuristic frequently picks a bridge
+	// instead, which breaks the L3 reply path through OPNsense for
+	// long-lived TCP. Skips silently when ExtNetwork+ExtGatewayIPs are
+	// both empty (single-network anchords have nothing to enforce).
+	var pinV4, pinV6 net.IP
+	for _, ip := range cfg.ExtGatewayIPs {
+		if ip.To4() != nil {
+			pinV4 = ip.To4()
+		} else {
+			pinV6 = ip
+		}
+	}
+	extRoute := extroute.New(cli, cfg.ExtNetwork, pinV4, pinV6, 0)
+	go func() {
+		if err := extRoute.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
+			slog.Error("extroute exited", "err", err)
 		}
 	}()
 
