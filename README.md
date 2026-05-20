@@ -467,8 +467,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-03T03:40:27Z
-- **Code hash:** `sha256:1d4583cf6e243c3d68c3cdba61d9cc42a3165d4d8c2012adf921d32fe6e4db52`
+- **Last verified:** 2026-05-20T13:31:27Z
+- **Code hash:** `sha256:5c3f9bad3f33eb4df324026d8c62a8c2667390ebe3ea02b6f317c17373643f3b`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -476,15 +476,21 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 97 | 0 | 0 | 97 |
-| E2E (test/e2e, 5 scenarios) | 70 | 0 | — | 70 |
-| **All tests** | **167** | **0** | **0** | **167** |
+| Go unit tests | 269 | 0 | 0 | 269 |
+| E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
+| **All tests** | **343** | **0** | **0** | **343** |
 
 <details>
-<summary>Go unit tests &mdash; 97/97 passed</summary>
+<summary>Go unit tests &mdash; 269/269 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
+| `cmd/anchord` | `TestBuildDiscoveryDiscriminator/empty_selector_empty_project_→_nil_(config_layer_guards_this)` | ✓ |
+| `cmd/anchord` | `TestBuildDiscoveryDiscriminator/legacy_project_only` | ✓ |
+| `cmd/anchord` | `TestBuildDiscoveryDiscriminator/selector_AND-joined,_deterministic_order_by_key` | ✓ |
+| `cmd/anchord` | `TestBuildDiscoveryDiscriminator/selector_alone` | ✓ |
+| `cmd/anchord` | `TestBuildDiscoveryDiscriminator/selector_replaces_project_(both_set,_both_ignored_on_selector_path)` | ✓ |
+| `cmd/anchord` | `TestBuildDiscoveryDiscriminator_Deterministic` | ✓ |
 | `cmd/anchord` | `TestSelectMode/ANCHORD_MODE=service-anchor` | ✓ |
 | `cmd/anchord` | `TestSelectMode/explicit_network-anchor_subcommand` | ✓ |
 | `cmd/anchord` | `TestSelectMode/flag-only_args_are_ignored` | ✓ |
@@ -492,35 +498,140 @@ release-readiness signal.
 | `cmd/anchord` | `TestSelectMode/subcommand_wins_over_env` | ✓ |
 | `cmd/anchord` | `TestSelectMode/unknown_env_errors` | ✓ |
 | `cmd/anchord` | `TestSelectMode/unknown_subcommand_errors` | ✓ |
-| `internal/config` | `TestDeriveMAC` | ✓ |
+| `internal/autostart` | `TestBackfill_NoStrandedSiblings_NoOp` | ✓ |
+| `internal/autostart` | `TestBackfill_StartsStrandedCreatedSibling` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_EmptyTargetReturnsNil` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_IgnoresNonCreated` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_IgnoresUnrelatedNetworkModes` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_LeadingSlashTolerated` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_LongIDMatch` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_MultipleSiblingsAllFire` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_NameMatch` | ✓ |
+| `internal/autostart` | `TestMatchSiblings_ShortIDMatch` | ✓ |
+| `internal/autostart` | `TestNew_NotNil` | ✓ |
+| `internal/autostart` | `TestReferencesFor_IncludesShortAndLongID` | ✓ |
+| `internal/autostart` | `TestRun_EventTriggersSiblingStart` | ✓ |
+| `internal/autostart` | `TestRun_F45_CreateErrorTolerated` | ✓ |
+| `internal/autostart` | `TestRun_F45_CreatesAndStartsWhenSAAbsent` | ✓ |
+| `internal/autostart` | `TestRun_F45_ExplicitGatewayIPWinsOverSelfIP` | ✓ |
+| `internal/autostart` | `TestRun_F45_ExtraEnvAndDeterministicOrder` | ✓ |
+| `internal/autostart` | `TestRun_F45_IgnoresUnrelatedTargets` | ✓ |
+| `internal/autostart` | `TestRun_F45_InactiveRecipeFallsBackToF43` | ✓ |
+| `internal/autostart` | `TestRun_F45_NoOpWhenManagedSAAlreadyRunning` | ✓ |
+| `internal/autostart` | `TestRun_F45_NoRecreateWhenSANetnsCurrent` | ✓ |
+| `internal/autostart` | `TestRun_F45_NoSharedNetYetSkipsCreate` | ✓ |
+| `internal/autostart` | `TestRun_F45_OperatorLabelsReachSpec` | ✓ |
+| `internal/autostart` | `TestRun_F45_RecreatesSAOnStaleNetns` | ✓ |
+| `internal/autostart` | `TestRun_F45_SharedNetworkLookupIsLazy` | ✓ |
+| `internal/autostart` | `TestRun_F45_SkipsCreateWhenSAInCreatedState` | ✓ |
+| `internal/autostart` | `TestRun_IgnoresNonStartEvents` | ✓ |
+| `internal/autostart` | `TestRun_StartFailureIsLoggedButLoopContinues` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/empty_netmode_tolerated` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/non-container_netmode_is_not_our_concern` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/ref_doesn't_resolve_at_all_(dead_netns)` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/ref_is_a_12-char_short-ID_prefix_of_the_current_target` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/ref_resolves_to_a_different_(still-listed)_container` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/ref_resolves_to_current_target_by_full_ID` | ✓ |
+| `internal/autostart` | `TestSATargetsStaleNetns/ref_resolves_to_current_target_by_name` | ✓ |
+| `internal/autostart` | `TestTargetMatchesRecipe/#00` | ✓ |
+| `internal/autostart` | `TestTargetMatchesRecipe//ak-outpost-ldap` | ✓ |
+| `internal/autostart` | `TestTargetMatchesRecipe/abcdef012345` | ✓ |
+| `internal/autostart` | `TestTargetMatchesRecipe/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789` | ✓ |
+| `internal/autostart` | `TestTargetMatchesRecipe/ak-outpost-ldap` | ✓ |
+| `internal/autostart` | `TestTargetMatchesRecipe/some-other-container` | ✓ |
 | `internal/config` | `TestFingerprintDeterministic` | ✓ |
+| `internal/config` | `TestFirstSelectorValue_Deterministic` | ✓ |
 | `internal/config` | `TestGetenvDefault` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_Defaults` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPDualStack/192.168.150.1,fd00::1` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPDualStack/fd00::1,_192.168.150.1` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPDuplicateFamily` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPEmpty` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPInvalid` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPSingle/v4` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPSingle/v4_with_whitespace` | ✓ |
+| `internal/config` | `TestLoadServiceAnchor_GatewayIPSingle/v6` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_Overrides` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_RejectsZeroInterval` | ✓ |
+| `internal/config` | `TestLoad_AddressModeInvalid` | ✓ |
+| `internal/config` | `TestLoad_AddressModeOverride/bootstrap` | ✓ |
+| `internal/config` | `TestLoad_AddressModeOverride/dhcp-refresh` | ✓ |
+| `internal/config` | `TestLoad_AddressModeOverride/slaac-ra-only` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/FALSE` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/TRUE` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/empty-string_treated_as_default` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/explicit_false` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/explicit_true` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/garbage_rejected` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/shorthand_0` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/shorthand_1` | ✓ |
+| `internal/config` | `TestLoad_AutostartSiblings/unset_→_default_true` | ✓ |
 | `internal/config` | `TestLoad_ComposeProjectFallback` | ✓ |
 | `internal/config` | `TestLoad_DefaultsAndDerivations` | ✓ |
+| `internal/config` | `TestLoad_ExtIfaceOverride` | ✓ |
+| `internal/config` | `TestLoad_ExtNetworkOptional` | ✓ |
+| `internal/config` | `TestLoad_ExtNetworkSet` | ✓ |
 | `internal/config` | `TestLoad_HostnameOverride` | ✓ |
-| `internal/config` | `TestLoad_MACInvalid` | ✓ |
-| `internal/config` | `TestLoad_MACOverride` | ✓ |
+| `internal/config` | `TestLoad_LabelSelectorAndProject_BothLoad` | ✓ |
+| `internal/config` | `TestLoad_LabelSelectorMalformed` | ✓ |
+| `internal/config` | `TestLoad_LabelSelectorReplacesProject` | ✓ |
+| `internal/config` | `TestLoad_LegacyProjectOnly` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_AllExplicit` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_DefaultsFromTarget` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_ExtraEnvEmpty` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_ExtraEnvMalformed` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_InactiveByDefault` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_LabelsMalformed` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_LabelsParsed` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_LabelsRejectsComposeKeys` | ✓ |
+| `internal/config` | `TestLoad_ManagedSA_LabelsRejectsManagedBy` | ✓ |
+| `internal/config` | `TestLoad_NoVLANParentRequired` | ✓ |
 | `internal/config` | `TestLoad_PollIntervalOverride` | ✓ |
 | `internal/config` | `TestLoad_ProjectOverridesCompose` | ✓ |
 | `internal/config` | `TestLoad_RequiresProject` | ✓ |
-| `internal/config` | `TestLoad_RequiresVLANParent` | ✓ |
+| `internal/config` | `TestLoad_SharedNetworkEmptyByDefault` | ✓ |
+| `internal/config` | `TestLoad_SharedNetworkPin` | ✓ |
 | `internal/config` | `TestMetricsAddrFromEnv/explicit_empty_→_disabled` | ✓ |
 | `internal/config` | `TestMetricsAddrFromEnv/set_→_value` | ✓ |
 | `internal/config` | `TestMetricsAddrFromEnv/unset_→_loopback_default` | ✓ |
+| `internal/config` | `TestParseAddressMode/#00` | ✓ |
+| `internal/config` | `TestParseAddressMode/BOOTSTRAP` | ✓ |
+| `internal/config` | `TestParseAddressMode/bootstrap` | ✓ |
+| `internal/config` | `TestParseAddressMode/dhcp-refresh` | ✓ |
+| `internal/config` | `TestParseAddressMode/slaac-ra-only` | ✓ |
+| `internal/config` | `TestParseAddressMode/static` | ✓ |
+| `internal/config` | `TestParseBoolDefault/explicit_false_overrides_default_true` | ✓ |
+| `internal/config` | `TestParseBoolDefault/explicit_true_overrides_default_false` | ✓ |
+| `internal/config` | `TestParseBoolDefault/invalid_yields_error` | ✓ |
+| `internal/config` | `TestParseBoolDefault/unset_returns_default_false` | ✓ |
+| `internal/config` | `TestParseBoolDefault/unset_returns_default_true` | ✓ |
+| `internal/config` | `TestParseBoolDefault/whitespace-only_treated_as_unset` | ✓ |
 | `internal/config` | `TestParseDuration/duration_string` | ✓ |
 | `internal/config` | `TestParseDuration/empty_uses_default` | ✓ |
 | `internal/config` | `TestParseDuration/invalid` | ✓ |
 | `internal/config` | `TestParseDuration/plain_int_=_seconds` | ✓ |
+| `internal/config` | `TestParseLabelSelector/F-42_example_—_Authentik_LDAP_outpost_role_selector` | ✓ |
+| `internal/config` | `TestParseLabelSelector/comma-joined_whitespace_tolerant` | ✓ |
+| `internal/config` | `TestParseLabelSelector/duplicate_key_with_conflicting_values_is_fatal` | ✓ |
+| `internal/config` | `TestParseLabelSelector/duplicate_key_with_same_value_collapses_(idempotent)` | ✓ |
+| `internal/config` | `TestParseLabelSelector/empty_input_yields_empty_map` | ✓ |
+| `internal/config` | `TestParseLabelSelector/empty_key_is_fatal` | ✓ |
+| `internal/config` | `TestParseLabelSelector/empty_value_is_valid_(matches_literal_empty)` | ✓ |
+| `internal/config` | `TestParseLabelSelector/entry_without_'='_is_fatal` | ✓ |
+| `internal/config` | `TestParseLabelSelector/single_pair` | ✓ |
+| `internal/config` | `TestParseLabelSelector/whitespace-only_input_yields_empty_map` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_NilIPIsNoop` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_NonzeroExitIsSilent` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_V4Command` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_V6Command` | ✓ |
+| `internal/dhcp` | `TestClientID_PrefixesType` | ✓ |
+| `internal/dhcp` | `TestClientID_StableAcrossCalls` | ✓ |
 | `internal/dhcp` | `TestExtractV6Addrs_NoIANAYieldsNil` | ✓ |
 | `internal/dhcp` | `TestRenewalInterval_FallsBackToHalfLease` | ✓ |
 | `internal/dhcp` | `TestRenewalInterval_UsesT1` | ✓ |
+| `internal/dhcp` | `TestRun_PassiveModes/bootstrap` | ✓ |
+| `internal/dhcp` | `TestRun_PassiveModes/slaac-ra-only` | ✓ |
+| `internal/dhcp` | `TestRun_UnknownMode` | ✓ |
 | `internal/dhcp` | `TestSleepBackoff_CapsAtMax` | ✓ |
 | `internal/dhcp` | `TestSleepBackoff_DoublesBelowCap` | ✓ |
 | `internal/dhcp` | `TestSleepBackoff_RespectsContextCancel` | ✓ |
@@ -531,6 +642,10 @@ release-readiness signal.
 | `internal/discovery` | `TestBackendEqual/rules_differ` | ✓ |
 | `internal/discovery` | `TestBackendEqual/rules_different_lengths` | ✓ |
 | `internal/discovery` | `TestBackendEqual/rules_order_swapped` | ✓ |
+| `internal/discovery` | `TestBuildEventFilter_NoExposeOnEvents` | ✓ |
+| `internal/discovery` | `TestBuildSnapshotFilter_EmptyDiscriminatorKeepsExposeGuard` | ✓ |
+| `internal/discovery` | `TestBuildSnapshotFilter_LabelSelectorAnd` | ✓ |
+| `internal/discovery` | `TestBuildSnapshotFilter_LegacyProject` | ✓ |
 | `internal/discovery` | `TestParseIP` | ✓ |
 | `internal/discovery` | `TestPickIPs_NilNetworkSettings` | ✓ |
 | `internal/discovery` | `TestPickIPs_NoSharedFallsBackToFirst` | ✓ |
@@ -538,15 +653,45 @@ release-readiness signal.
 | `internal/discovery` | `TestPickIPs_SharedNetworkExplicit` | ✓ |
 | `internal/discovery` | `TestPickIPs_V4Only` | ✓ |
 | `internal/discovery` | `TestPickIPs_V6Only` | ✓ |
+| `internal/discovery` | `TestResolveSharedNetIPs_DirectAttachmentSkipsFollow` | ✓ |
+| `internal/discovery` | `TestResolveSharedNetIPs_FollowsContainerNetworkMode` | ✓ |
+| `internal/discovery` | `TestResolveSharedNetIPs_WrapTargetMissing` | ✓ |
 | `internal/discovery` | `TestRuleLess` | ✓ |
 | `internal/discovery` | `TestStateEqual` | ✓ |
 | `internal/discovery` | `TestTrimName` | ✓ |
+| `internal/extiface` | `TestResolve_APIError_RetriesThenFails` | ✓ |
+| `internal/extiface` | `TestResolve_ContextCancelStopsRetry` | ✓ |
+| `internal/extiface` | `TestResolve_EmptyMACTreatedAsNotYet` | ✓ |
+| `internal/extiface` | `TestResolve_EmptyNetworkName` | ✓ |
+| `internal/extiface` | `TestResolve_InvalidMACFormat` | ✓ |
+| `internal/extiface` | `TestResolve_MACMissingOnHost_Fatal` | ✓ |
+| `internal/extiface` | `TestResolve_NetworkAbsent_Fatal` | ✓ |
+| `internal/extiface` | `TestResolve_NetworkAttachedLate` | ✓ |
+| `internal/extiface` | `TestResolve_PicksByMACNotIfaceName` | ✓ |
+| `internal/extiface` | `TestResolve_Success` | ✓ |
+| `internal/extroute` | `TestRun_DHCPChannelClosedKeepsLastValue` | ✓ |
+| `internal/extroute` | `TestRun_DHCPDynamicOverridesPinAndIPAM` | ✓ |
+| `internal/extroute` | `TestRun_DHCPRenewalSameValueNoChurn` | ✓ |
+| `internal/extroute` | `TestRun_IPAMErrorFallsBackToPin` | ✓ |
+| `internal/extroute` | `TestRun_IPAMFallbackWhenNoPinNoDHCP` | ✓ |
+| `internal/extroute` | `TestRun_NothingResolved_QuietNoop` | ✓ |
+| `internal/extroute` | `TestRun_PinV4_IPAMv6_MixedSource` | ✓ |
+| `internal/extroute` | `TestRun_PinWinsOverIPAM` | ✓ |
+| `internal/extroute` | `TestRun_ReAssertsOnExternalRevert` | ✓ |
 | `internal/health` | `TestLiveness_AlwaysOK/fresh_tracker` | ✓ |
 | `internal/health` | `TestLiveness_AlwaysOK/tracker_with_state` | ✓ |
 | `internal/health` | `TestMarks_AreIdempotent` | ✓ |
 | `internal/health` | `TestNetworkAnchorReadiness_ReconcileAloneNotReady` | ✓ |
 | `internal/health` | `TestNetworkAnchorReadiness_StateMachine` | ✓ |
 | `internal/health` | `TestServiceAnchorReadiness_StateMachine` | ✓ |
+| `internal/labels` | `TestParse/F-46_backend_port_0_rejected` | ✓ |
+| `internal/labels` | `TestParse/F-46_backend_port_out_of_range` | ✓ |
+| `internal/labels` | `TestParse/F-46_mixed_list_—_one_translating,_one_not` | ✓ |
+| `internal/labels` | `TestParse/F-46_non-numeric_backend_port` | ✓ |
+| `internal/labels` | `TestParse/F-46_trailing_colon_(empty_backend_port)_is_fatal` | ✓ |
+| `internal/labels` | `TestParse/F-46_translation_—_Authentik_LDAPS_636_->_6636` | ✓ |
+| `internal/labels` | `TestParse/F-46_udp_translation_also_supported` | ✓ |
+| `internal/labels` | `TestParse/F-46_whitespace_around_translation_suffix_tolerated` | ✓ |
 | `internal/labels` | `TestParse/absent` | ✓ |
 | `internal/labels` | `TestParse/bad_port` | ✓ |
 | `internal/labels` | `TestParse/bad_proto` | ✓ |
@@ -566,64 +711,92 @@ release-readiness signal.
 | `internal/nat` | `TestFamilyString` | ✓ |
 | `internal/nat` | `TestIfaceBytes/empty` | ✓ |
 | `internal/nat` | `TestIfaceBytes/short_name_padded` | ✓ |
-| `internal/nat` | `TestIfaceBytes/typical_anchord-ext` | ✓ |
+| `internal/nat` | `TestIfaceBytes/typical_eth0` | ✓ |
 | `internal/nat` | `TestMapForFamProto` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_DualStack` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_Empty` | ✓ |
+| `internal/reconciler` | `TestDesiredFromState_F46PortTranslation` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_MultipleBackendsAndProtocols` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_SamePortFromTwoBackends` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_V4OnlyBackend` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_V6Off` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_V6OnlyBackend` | ✓ |
 | `internal/serviceanchor` | `TestDefaultRouteFor_Validation` | ✓ |
+| `internal/serviceanchor` | `TestIsAllZerosCIDR/0.0.0.0/0` | ✓ |
+| `internal/serviceanchor` | `TestIsAllZerosCIDR/10.0.0.0/8` | ✓ |
+| `internal/serviceanchor` | `TestIsAllZerosCIDR/::/0` | ✓ |
+| `internal/serviceanchor` | `TestIsAllZerosCIDR/fd30::/64` | ✓ |
+| `internal/serviceanchor` | `TestIsAllZerosCIDR/nil` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_InstallsBothFamilies` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_KeepsLastGoodOnLookupError` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_NoOpWhenUnchanged` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_ReplacesOnIPChange` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_RetriesAfterFailedInstall` | ✓ |
+| `internal/serviceanchor` | `TestRun_GreenfieldMode_NoRestore` | ✓ |
+| `internal/serviceanchor` | `TestRun_IPMode_NoPeriodicResolve` | ✓ |
+| `internal/serviceanchor` | `TestRun_IPMode_SkipsDNS` | ✓ |
 | `internal/serviceanchor` | `TestRun_LoopsAndCleansUp` | ✓ |
+| `internal/serviceanchor` | `TestRun_RecordErrorTolerated` | ✓ |
+| `internal/serviceanchor` | `TestRun_WrapMode_DualStackRestore` | ✓ |
+| `internal/serviceanchor` | `TestRun_WrapMode_RestoresOriginalOnShutdown` | ✓ |
+| `internal/sharednet` | `TestCountBackendsPerNetwork` | ✓ |
+| `internal/sharednet` | `TestNew_CandidatesSortedAlpha` | ✓ |
+| `internal/sharednet` | `TestNew_PinnedNotInSelfNetworks_Rejected` | ✓ |
+| `internal/sharednet` | `TestPick_AllExcluded_ReturnsEmpty` | ✓ |
+| `internal/sharednet` | `TestPick_AuthentikFrigateBugFixed` | ✓ |
+| `internal/sharednet` | `TestPick_BackendCount_PicksHighest` | ✓ |
+| `internal/sharednet` | `TestPick_EmptyBackendSet_FallbackNoSettle` | ✓ |
+| `internal/sharednet` | `TestPick_FallbackThenSwitchOnFirstBackend` | ✓ |
+| `internal/sharednet` | `TestPick_PinnedOverride` | ✓ |
+| `internal/sharednet` | `TestPick_StableOnceSettled` | ✓ |
+| `internal/sharednet` | `TestPick_TieAllTransitAlphabetical` | ✓ |
+| `internal/sharednet` | `TestPick_TieTransitCaseInsensitive/FooTransitBar` | ✓ |
+| `internal/sharednet` | `TestPick_TieTransitCaseInsensitive/TRANSIT` | ✓ |
+| `internal/sharednet` | `TestPick_TieTransitCaseInsensitive/Transit` | ✓ |
+| `internal/sharednet` | `TestPick_TieTransitPreferred` | ✓ |
 
 </details>
 
 <details>
-<summary>E2E &mdash; 70/70 passed across 5 scenarios</summary>
+<summary>E2E &mdash; 74/74 passed across 5 scenarios</summary>
 
 | Scenario | Assertion | Status |
 |---|---|:---:|
 | `v4-only` | anchord container running | ✓ |
-| `v4-only` | anchord-ext interface present | ✓ |
+| `v4-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `v4-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v4-only` | nftables anchord_v4 table installed | ✓ |
 | `v4-only` | nftables anchord_v6 table installed | ✓ |
-| `v4-only` | anchord-ext has IPv4 from 10.99.0.0/24 | ✓ |
-| `v4-only` | anchord-ext has no fd99:: address | ✓ |
+| `v4-only` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
 | `v4-only` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `v4-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
+| `v4-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
 | `v4-only` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
 | `v4-only` | S-3 reachable on tcp/25 after recreate | ✓ |
 | `v4-only` | S-6 anchord exited cleanly (code 0) | ✓ |
 | `v4-only` | S-6 logs show graceful shutdown | ✓ |
-| `v4-only` | S-6 logs show macvlan removed | ✓ |
 | `v4-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `v6-only` | anchord container running | ✓ |
-| `v6-only` | anchord-ext interface present | ✓ |
+| `v6-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `v6-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v6-only` | nftables anchord_v4 table installed | ✓ |
 | `v6-only` | nftables anchord_v6 table installed | ✓ |
-| `v6-only` | anchord-ext has no IPv4 (10.99.0/24) | ✓ |
-| `v6-only` | anchord-ext has IPv6 from fd99::/64 (RA) | ✓ |
+| `v6-only` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `v6-only` | anchord_v6 dnat_tcp contains port 25 | ✓ |
+| `v6-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v6-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
 | `v6-only` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
 | `v6-only` | S-3 reachable on tcp/25 after recreate | ✓ |
 | `v6-only` | S-6 anchord exited cleanly (code 0) | ✓ |
 | `v6-only` | S-6 logs show graceful shutdown | ✓ |
-| `v6-only` | S-6 logs show macvlan removed | ✓ |
 | `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `both` | anchord container running | ✓ |
-| `both` | anchord-ext interface present | ✓ |
+| `both` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `both` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `both` | nftables anchord_v4 table installed | ✓ |
 | `both` | nftables anchord_v6 table installed | ✓ |
-| `both` | anchord-ext has IPv4 from 10.99.0.0/24 | ✓ |
-| `both` | anchord-ext has IPv6 from fd99::/64 (RA) | ✓ |
+| `both` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `both` | S-2 (v4) source IP preserved through DNAT | ✓ |
@@ -632,24 +805,28 @@ release-readiness signal.
 | `both` | S-3 reachable on tcp/25 after recreate | ✓ |
 | `both` | S-6 anchord exited cleanly (code 0) | ✓ |
 | `both` | S-6 logs show graceful shutdown | ✓ |
-| `both` | S-6 logs show macvlan removed | ✓ |
 | `both` | S-6 nat teardown clean (no warnings) | ✓ |
 | `none` | anchord container running | ✓ |
-| `none` | anchord-ext interface present | ✓ |
+| `none` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `none` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `none` | nftables anchord_v4 table installed | ✓ |
 | `none` | nftables anchord_v6 table installed | ✓ |
-| `none` | anchord-ext has no IPv4 lease (expected) | ✓ |
-| `none` | anchord-ext has no IPv6 (expected) | ✓ |
+| `none` | eth0 keeps Docker-bootstrapped IPv4 | ✓ |
+| `none` | eth0 keeps Docker-bootstrapped IPv6 | ✓ |
+| `none` | S-2 (v4) source IP preserved through DNAT | ✓ |
+| `none` | S-2 (v6) source IP preserved through DNAT | ✓ |
+| `none` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
+| `none` | S-3 reachable on tcp/25 after recreate | ✓ |
 | `none` | S-6 anchord exited cleanly (code 0) | ✓ |
 | `none` | S-6 logs show graceful shutdown | ✓ |
-| `none` | S-6 logs show macvlan removed | ✓ |
 | `none` | S-6 nat teardown clean (no warnings) | ✓ |
 | `dhcpv6-stateful` | anchord container running | ✓ |
-| `dhcpv6-stateful` | anchord-ext interface present | ✓ |
+| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `dhcpv6-stateful` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v4 table installed | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v6 table installed | ✓ |
-| `dhcpv6-stateful` | anchord-ext has IPv4 from 10.99.0.0/24 | ✓ |
-| `dhcpv6-stateful` | anchord-ext has IPv6 from fd99::/64 (DHCPv6) | ✓ |
+| `dhcpv6-stateful` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `dhcpv6-stateful` | eth1 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
 | `dhcpv6-stateful` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | S-2 (v4) source IP preserved through DNAT | ✓ |
@@ -658,7 +835,6 @@ release-readiness signal.
 | `dhcpv6-stateful` | S-3 reachable on tcp/25 after recreate | ✓ |
 | `dhcpv6-stateful` | S-6 anchord exited cleanly (code 0) | ✓ |
 | `dhcpv6-stateful` | S-6 logs show graceful shutdown | ✓ |
-| `dhcpv6-stateful` | S-6 logs show macvlan removed | ✓ |
 | `dhcpv6-stateful` | S-6 nat teardown clean (no warnings) | ✓ |
 
 </details>
