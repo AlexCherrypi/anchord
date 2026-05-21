@@ -18,21 +18,22 @@ before writing code. Don't quietly route around the design.
 
 ## Project status
 
+**Production.** `v1.0.0` tagged 2026-05-20. Running on a small
+self-hosted fleet (TrueNAS SCALE host, 6+ Compose stacks, ~14
+service-anchors — Mailcow, Authentik, Nextcloud-AIO, Traefik, …)
+under real workloads (SMTP, IMAP IDLE, LDAP binds, OIDC, Nextcloud
+Talk). The README's auto-generated TEST-REPORT block reflects the
+v1.0.0 cut: 269 unit + 74 e2e green, hash matched.
+
 v2 pivot landed on `main` (2026-05-18): macvlan ownership moved from
 anchord to Docker. anchord no longer creates a `anchord-ext` child or
 needs sysctl/host-NS gymnastics; it joins an `external: true` Docker
 macvlan network like any other container and runs only the L3/L4
 surface (optional DHCP refresh, nftables DNAT/MASQUERADE). See
-SPEC-v2-DRAFT.md for the deltas; the items in "Open questions / future
-work" below are historical v1 milestones, retained for context.
+SPEC-v2-DRAFT.md plus the per-feature `SPEC-*-DRAFT.md` files
+(F-39..F-46) for the contracts.
 
-The TEST-REPORT block in README is stale until `scripts/update-test-report.sh`
-runs against v2. Several recorded test names (`TestDeriveMAC`,
-`TestLoad_RequiresVLANParent`, `TestLoad_MACOverride`, the e2e
-`anchord-ext`/`macvlan removed` assertions) no longer exist; they will
-drop out on the next regen.
-
-Beta, feature-complete. Functional surface as of 2026-05-03:
+Functional surface as of v1.0.0:
 
 - Network-anchor and service-anchor modes both implemented and
   tested. Single binary, `ANCHORD_MODE=network-anchor` (default) or

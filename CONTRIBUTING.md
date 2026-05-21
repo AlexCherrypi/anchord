@@ -1,8 +1,10 @@
 # Contributing to anchord
 
-Thanks for your interest. anchord is feature-complete and in beta;
-contributions are very welcome — especially real-host validation,
-edge-case bug reports, and SPEC-level discussion before code.
+Thanks for your interest. anchord is in production (v1.0.0 since
+2026-05-20); contributions are very welcome — especially production
+edge-case bug reports, SPEC-level discussion before code, and
+patterns from real deployments that don't match the existing
+service-anchor / wrap pattern documentation.
 
 ## Before you start
 

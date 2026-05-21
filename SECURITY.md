@@ -2,11 +2,15 @@
 
 ## Supported versions
 
-anchord is in **beta** (feature-complete, awaiting real-host
-validation before a v1 tag). There are no formal supported version
-lines yet; the only intended target is `main` and the current
-`:latest` container image. Once a v1.0 line exists, this section
-will be updated.
+anchord shipped **v1.0.0** on 2026-05-20 and is running in
+production on a small self-hosted fleet. Supported targets:
+
+- The latest `v1.x.y` release (current: `v1.0.0`).
+- `main`, which carries fixes ahead of the next tag.
+- The `:latest` container image, which tracks `main`.
+
+Older pre-v1 tags (`v0.1.0-alpha`, `v0.9.0`) receive no security
+fixes — upgrade to the current `v1.x` line.
 
 ## Reporting a vulnerability
 
