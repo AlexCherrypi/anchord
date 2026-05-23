@@ -171,24 +171,75 @@ func (d *Discoverer) eventLoop(ctx context.Context) error {
 
 	for {
 		msgs, errs := d.cli.Events(ctx, events.ListOptions{Filters: f})
+		// consumeEvents stays on the SAME (msgs, errs) pair until the
+		// stream ends (errs/closed) or ctx is cancelled. Earlier
+		// versions exited the inner select after every single message
+		// and re-called cli.Events, which opens a fresh long-poll HTTP
+		// request to the docker daemon each time but never closes the
+		// previous one — the prior goroutine stays parked on the old
+		// connection. On busy event sources (e.g. a Frigate watchdog
+		// restarting ffmpeg subprocesses) anchord then accumulates
+		// hundreds of ESTAB sockets to docker(-proxy) until the kernel
+		// hits its tcp_mem ceiling.
+		retry, err := d.consumeEvents(ctx, msgs, errs)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			return nil
+		}
+	}
+}
+
+// consumeEvents reads from a single (msgs, errs) stream pair, snapshot-
+// ing on every message, until ctx is cancelled or the stream ends.
+// Returns retry=true if the caller should reconnect with a fresh stream.
+//
+// Split out from eventLoop so consumeEventStream stays free of *Discoverer
+// state — that's the form unit tests exercise without a docker daemon.
+func (d *Discoverer) consumeEvents(ctx context.Context, msgs <-chan events.Message, errs <-chan error) (retry bool, err error) {
+	return consumeEventStream(ctx, msgs, errs, func() {
+		if err := d.snapshot(ctx); err != nil {
+			slog.Warn("event-driven snapshot failed", "err", err)
+		}
+	})
+}
+
+// consumeEventStream is the pure consume-loop. Behaviour contract:
+//   - ctx cancelled    → returns (false, ctx.Err())
+//   - errs delivers    → returns (true, nil) after a 2s backoff
+//   - msgs is closed   → returns (true, nil) immediately
+//   - msgs message     → onMessage() invoked, loop continues on SAME stream
+//
+// The invariant: while messages keep flowing, the function does NOT
+// return — callers must not re-enter to reopen a fresh stream per
+// message. That pattern leaked the long-poll HTTP request to
+// docker(-proxy) on every event (F-46 regression).
+func consumeEventStream(ctx context.Context, msgs <-chan events.Message, errs <-chan error, onMessage func()) (retry bool, err error) {
+	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-errs:
+			return false, ctx.Err()
+		case e := <-errs:
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return false, ctx.Err()
 			}
-			slog.Warn("docker event stream error, retrying", "err", err)
-			time.Sleep(2 * time.Second)
-			continue
-		case msg := <-msgs:
+			slog.Warn("docker event stream error, retrying", "err", e)
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+			return true, nil
+		case msg, ok := <-msgs:
+			if !ok {
+				return true, nil
+			}
 			// We don't filter by action — any container event in our
-			// project is a reason to re-scan. Cheap.
+			// scope is a reason to re-scan. Cheap.
 			metrics.DockerEvents.WithLabelValues("event").Inc()
 			slog.Debug("docker event", "action", msg.Action, "actor", msg.Actor.ID[:12])
-			if err := d.snapshot(ctx); err != nil {
-				slog.Warn("event-driven snapshot failed", "err", err)
-			}
+			onMessage()
 		}
 	}
 }

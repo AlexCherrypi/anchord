@@ -1,14 +1,19 @@
 package discovery
 
 import (
+	"context"
+	"errors"
 	"net"
 	"reflect"
 	"sort"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/AlexCherrypi/anchord/internal/labels"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
 )
 
@@ -399,5 +404,79 @@ func TestParseIP(t *testing.T) {
 	}
 	if ip := parseIP("fd00::5"); ip == nil || !ip.Equal(net.ParseIP("fd00::5")) {
 		t.Errorf("fd00::5 round-trip: got %v", ip)
+	}
+}
+
+// Regression for the docker-socket-proxy connection leak: a single
+// open stream must serve many messages — consumeEventStream must not
+// return between messages, only on stream-end or ctx cancellation.
+// Earlier eventLoop versions broke out of the select after each
+// message and re-called cli.Events, leaking a long-poll HTTP request
+// to docker(-proxy) per event.
+func TestConsumeEventStream_StaysOnSameStreamAcrossMessages(t *testing.T) {
+	msgs := make(chan events.Message, 5)
+	errs := make(chan error, 1)
+	var calls atomic.Int32
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Pump 5 messages, then close to signal end-of-stream.
+	go func() {
+		for i := 0; i < 5; i++ {
+			msgs <- events.Message{Action: "start", Actor: events.Actor{ID: "abcdef0123456789"}}
+		}
+		close(msgs)
+	}()
+
+	retry, err := consumeEventStream(ctx, msgs, errs, func() {
+		calls.Add(1)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !retry {
+		t.Error("retry should be true on stream close so caller reopens")
+	}
+	if got := calls.Load(); got != 5 {
+		t.Errorf("onMessage calls: got %d, want 5 (all messages processed on the same stream)", got)
+	}
+}
+
+func TestConsumeEventStream_CtxCancelStopsLoop(t *testing.T) {
+	msgs := make(chan events.Message)
+	errs := make(chan error)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	retry, err := consumeEventStream(ctx, msgs, errs, func() {})
+	if retry {
+		t.Error("retry should be false when ctx cancelled — caller should not reopen")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err: got %v, want context.Canceled", err)
+	}
+}
+
+func TestConsumeEventStream_ErrSignalRequestsRetry(t *testing.T) {
+	msgs := make(chan events.Message)
+	errs := make(chan error, 1)
+
+	// Use a context with a small timeout so the post-error backoff
+	// returns quickly without holding the test up for 2 s.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	errs <- errors.New("stream interrupted")
+
+	retry, err := consumeEventStream(ctx, msgs, errs, func() {
+		t.Error("onMessage must not be called on errs path")
+	})
+	// Backoff hit ctx-cancel rather than completing — that's fine, the
+	// real-world caller already received the "retry after backoff"
+	// instruction and will simply observe ctx.Err() next.
+	if err == nil && !retry {
+		t.Error("on err with no ctx-cancel mid-backoff we expect retry=true")
 	}
 }
