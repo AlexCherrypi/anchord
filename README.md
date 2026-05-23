@@ -338,6 +338,7 @@ All via environment variables.
 | `ANCHORD_PROJECT`            | yes¹     | `$COMPOSE_PROJECT_NAME` | Scope of containers anchord manages. Required unless `ANCHORD_LABEL_SELECTOR` is set. Ignored (with a WARN log) when both are set |
 | `ANCHORD_LABEL_SELECTOR`     | no       |                    | F-42: replaces the project filter with an operator-defined label set, comma-separated `key=value` AND-joined (e.g. `anchord.role=ldap-outpost,env=prod`). Use when multiple anchords share a project, or when target containers are spawned outside Compose and carry no project label (e.g. authentik outposts) |
 | `ANCHORD_AUTOSTART_SIBLINGS` | no       | `true`             | F-43: watch Docker for `container start` events and bootstrap any sibling container in `Created` state whose `network_mode: container:<X>` matches the just-started target. Needed for service-anchors whose target is spawned at runtime (e.g. authentik outposts via the Docker API). Requires `POST=1` on the docker-socket-proxy. Set to `false` to disable |
+| `ANCHORD_AUTOFIX_DEAD_NETNS` | no       | `true`             | Issue #10: when the network-anchor recreates its F-45-managed service-anchor (stale-netns or image-drift path), also re-create every wrap dependent that was pinned to the old SA's container ID. Without this, the dependents end up in a destroyed netns and look running to Docker while being invisible to the outside. Requires `DELETE=1` + container create/start on the docker-socket-proxy (same set F-45's existing SA recreate already needs). Set to `false` to keep v1.1.0 behaviour (detection-only via the dependents watcher's WARN log) |
 | `ANCHORD_MANAGED_SA_TARGET`  | no       |                    | F-45: stable name of a runtime-spawned target container. When set, the network-anchor not only auto-starts existing Created-state siblings (F-43) but CREATES a service-anchor on demand when this target appears. Needed when Compose cannot declare the service-anchor (target doesn't yet exist at compose-up time and Compose halts on create-then-cant-start). Empty = pure F-43 behaviour |
 | `ANCHORD_MANAGED_SA_NAME`    | no       | `<TARGET>-service-anchor` | F-45: name of the container the network-anchor creates. Only consulted when `ANCHORD_MANAGED_SA_TARGET` is set |
 | `ANCHORD_MANAGED_SA_IMAGE`   | no       | (anchord's own image) | F-45: image for the managed service-anchor. Default resolved at runtime from the network-anchor's own container inspect — keeps both containers on the same image version |
@@ -481,17 +482,22 @@ not running, a different host, post-mortem analysis).
   Default is `anchord`, which matches the canonical service name in the
   example compose. If you rename the network-anchor service, set
   `ANCHORD_GATEWAY_HOSTNAME` on each service-anchor to match.
-- **Recreating a service-anchor orphans its wrap dependents.** Any
+- **Recreating a service-anchor orphans its wrap dependents** —
+  but in the common case anchord now repairs them itself. Any
   container declaring `network_mode: service:fe-anchor-X` is pinned
   to fe-anchor-X's container ID at create-time and stays pinned
-  across recreate. After
-  `docker compose up -d --no-deps --force-recreate fe-anchor-X` (or
-  any `docker rm` of the SA), recreate every dependent in the same
-  stack — typically the per-stack Traefik plus any acme/wrap services
-  netns-mode'd to the same fe-anchor. anchord detects the situation
-  and emits a `WARN dependent in dead netns ...` log line per victim,
-  but it does not (yet) auto-recreate. Use
-  `anchord doctor stale-netns` for a cluster-wide one-shot scan.
+  across recreate. When **anchord** recreates its F-45-managed
+  service-anchor (stale-netns or image-drift path), it enumerates
+  every wrap dependent of the old SA and re-creates each against
+  the new SA's ID before returning — see the `ANCHORD_AUTOFIX_DEAD_NETNS`
+  flag (default on). When **the operator** recreates a service-anchor
+  manually (`docker rm`, `compose up --force-recreate`), anchord's
+  v1.1.0 dependents watcher still emits a `WARN dependent in dead netns
+  ...` log line per victim with the exact recovery command — auto-fix
+  only fires for SA recreates anchord caused itself, because there
+  the scope is unambiguous (no race with operator, no scope
+  discovery). Use `anchord doctor stale-netns` for a cluster-wide
+  one-shot scan after a manual incident.
 - **One network-anchor per backend identity.** Default discovery
   scope is the Compose project; two anchords filtering the same set
   of backends will fight over their DNAT entries. With
@@ -517,8 +523,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-23T12:45:19Z
-- **Code hash:** `sha256:db048ac8786e43a2611b06337fc10d936524392fcac2b2bd0aaec97db917468e`
+- **Last verified:** 2026-05-23T13:44:45Z
+- **Code hash:** `sha256:86847f79079a156afd50c1eb7ffc422a112d3a16460627f7735635feae6a1525`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -526,12 +532,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 301 | 0 | 0 | 301 |
+| Go unit tests | 315 | 0 | 0 | 315 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **375** | **0** | **0** | **375** |
+| **All tests** | **389** | **0** | **0** | **389** |
 
 <details>
-<summary>Go unit tests &mdash; 301/301 passed</summary>
+<summary>Go unit tests &mdash; 315/315 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -554,10 +560,14 @@ release-readiness signal.
 | `cmd/anchord` | `TestSelectMode/unknown_env_errors` | ✓ |
 | `cmd/anchord` | `TestSelectMode/unknown_subcommand_errors` | ✓ |
 | `internal/autostart` | `TestBackfill_F45_NoImageCheckWhenRecipePinsImage` | ✓ |
+| `internal/autostart` | `TestBackfill_F45_NoRebindOnAbsentSA` | ✓ |
+| `internal/autostart` | `TestBackfill_F45_NoRebindWhenAutoFixDisabled` | ✓ |
 | `internal/autostart` | `TestBackfill_F45_NoRecreateWhenImagesMatch` | ✓ |
+| `internal/autostart` | `TestBackfill_F45_ReboundDependentsOnImageDrift` | ✓ |
 | `internal/autostart` | `TestBackfill_F45_RecreatesSAOnImageDrift` | ✓ |
 | `internal/autostart` | `TestBackfill_NoStrandedSiblings_NoOp` | ✓ |
 | `internal/autostart` | `TestBackfill_StartsStrandedCreatedSibling` | ✓ |
+| `internal/autostart` | `TestFindOrphanCandidates_ByAllRefForms` | ✓ |
 | `internal/autostart` | `TestMatchSiblings_EmptyTargetReturnsNil` | ✓ |
 | `internal/autostart` | `TestMatchSiblings_IgnoresNonCreated` | ✓ |
 | `internal/autostart` | `TestMatchSiblings_IgnoresUnrelatedNetworkModes` | ✓ |
@@ -582,6 +592,8 @@ release-readiness signal.
 | `internal/autostart` | `TestRun_F45_NoRespawnIfTargetAlsoGone` | ✓ |
 | `internal/autostart` | `TestRun_F45_NoSharedNetYetSkipsCreate` | ✓ |
 | `internal/autostart` | `TestRun_F45_OperatorLabelsReachSpec` | ✓ |
+| `internal/autostart` | `TestRun_F45_RebindContinuesAfterPerDepFailure` | ✓ |
+| `internal/autostart` | `TestRun_F45_ReboundDependentsOnStaleNetns` | ✓ |
 | `internal/autostart` | `TestRun_F45_RecreatesSAOnDestroy` | ✓ |
 | `internal/autostart` | `TestRun_F45_RecreatesSAOnStaleNetns` | ✓ |
 | `internal/autostart` | `TestRun_F45_SharedNetworkLookupIsLazy` | ✓ |
@@ -619,6 +631,14 @@ release-readiness signal.
 | `internal/config` | `TestLoad_AddressModeOverride/bootstrap` | ✓ |
 | `internal/config` | `TestLoad_AddressModeOverride/dhcp-refresh` | ✓ |
 | `internal/config` | `TestLoad_AddressModeOverride/slaac-ra-only` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/FALSE` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/TRUE` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/explicit_false` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/explicit_true` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/garbage_rejected` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/shorthand_0` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/shorthand_1` | ✓ |
+| `internal/config` | `TestLoad_AutoFixDeadNetns/unset_→_default_true` | ✓ |
 | `internal/config` | `TestLoad_AutostartSiblings/FALSE` | ✓ |
 | `internal/config` | `TestLoad_AutostartSiblings/TRUE` | ✓ |
 | `internal/config` | `TestLoad_AutostartSiblings/empty-string_treated_as_default` | ✓ |
@@ -859,11 +879,11 @@ release-readiness signal.
 | `v4-only` | S-6 logs show graceful shutdown | ✓ |
 | `v4-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `v6-only` | anchord container running | ✓ |
-| `v6-only` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `v6-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `v6-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v6-only` | nftables anchord_v4 table installed | ✓ |
 | `v6-only` | nftables anchord_v6 table installed | ✓ |
-| `v6-only` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `v6-only` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `v6-only` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `v6-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v6-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
@@ -873,12 +893,12 @@ release-readiness signal.
 | `v6-only` | S-6 logs show graceful shutdown | ✓ |
 | `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `both` | anchord container running | ✓ |
-| `both` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `both` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `both` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `both` | nftables anchord_v4 table installed | ✓ |
 | `both` | nftables anchord_v6 table installed | ✓ |
-| `both` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
-| `both` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `both` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `both` | S-2 (v4) source IP preserved through DNAT | ✓ |
@@ -889,12 +909,12 @@ release-readiness signal.
 | `both` | S-6 logs show graceful shutdown | ✓ |
 | `both` | S-6 nat teardown clean (no warnings) | ✓ |
 | `none` | anchord container running | ✓ |
-| `none` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `none` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `none` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `none` | nftables anchord_v4 table installed | ✓ |
 | `none` | nftables anchord_v6 table installed | ✓ |
-| `none` | eth1 keeps Docker-bootstrapped IPv4 | ✓ |
-| `none` | eth1 keeps Docker-bootstrapped IPv6 | ✓ |
+| `none` | eth0 keeps Docker-bootstrapped IPv4 | ✓ |
+| `none` | eth0 keeps Docker-bootstrapped IPv6 | ✓ |
 | `none` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `none` | S-2 (v6) source IP preserved through DNAT | ✓ |
 | `none` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
@@ -903,12 +923,12 @@ release-readiness signal.
 | `none` | S-6 logs show graceful shutdown | ✓ |
 | `none` | S-6 nat teardown clean (no warnings) | ✓ |
 | `dhcpv6-stateful` | anchord container running | ✓ |
-| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `dhcpv6-stateful` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v4 table installed | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v6 table installed | ✓ |
-| `dhcpv6-stateful` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
-| `dhcpv6-stateful` | eth0 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
+| `dhcpv6-stateful` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `dhcpv6-stateful` | eth1 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
 | `dhcpv6-stateful` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | S-2 (v4) source IP preserved through DNAT | ✓ |

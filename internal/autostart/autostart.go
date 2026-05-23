@@ -136,6 +136,18 @@ type dockerOps interface {
 	// events, errs delivers terminal errors (caller is expected to
 	// re-subscribe on error).
 	Events(ctx context.Context) (<-chan EventMsg, <-chan error)
+
+	// RecreateWithNetworkMode atomically inspects a container, removes
+	// it, and recreates it with the same config except for
+	// HostConfig.NetworkMode (replaced with newNetMode). Returns the
+	// new container's ID after it has been started.
+	//
+	// Used by the F-45 dead-netns dep rebind path (issue #10): when
+	// the network-anchor recreates its managed SA, any wrap-dependent
+	// pinned to the old SA's container ID would be orphaned in a
+	// destroyed netns. We re-create each dep against the new SA's
+	// ID before returning control to the watcher.
+	RecreateWithNetworkMode(ctx context.Context, id, newNetMode string) (string, error)
 }
 
 // Watcher is the live F-43 / F-45 worker. One instance per
@@ -157,6 +169,15 @@ type Watcher struct {
 	// pure-F-43 stacks; buildSpec only consults it when GatewayIP
 	// is unset.
 	sharedNetFn func() string
+
+	// autoFixDeadNetns toggles the F-45 wrap-dep rebind path (issue
+	// #10). When true (default), every SA recreate enumerates
+	// containers pinned to the old SA's container ID and re-creates
+	// each against the new SA's ID, before returning control to the
+	// caller. When false, the recreate proceeds as before and the
+	// wrap dependents are left orphaned in the destroyed netns until
+	// the operator (or the v1.1.0 dependents watcher) notices.
+	autoFixDeadNetns bool
 }
 
 // New constructs a Watcher backed by a live Docker client. recipe
@@ -176,6 +197,10 @@ func New(cli *client.Client, recipe config.ManagedSARecipe) *Watcher {
 //
 // Passing nil disables the lazy lookup (pure-F-43 mode).
 func (w *Watcher) SetSharedNetworkFunc(fn func() string) { w.sharedNetFn = fn }
+
+// SetAutoFixDeadNetns toggles the F-45 wrap-dep rebind path (issue
+// #10). Plumbed from cfg.AutoFixDeadNetns. Safe to call before Run.
+func (w *Watcher) SetAutoFixDeadNetns(v bool) { w.autoFixDeadNetns = v }
 
 // sharedNet returns the picker's current choice, or "" when no
 // callback has been wired or the picker hasn't settled yet.
@@ -279,13 +304,11 @@ func (w *Watcher) backfill(ctx context.Context) {
 	// F-45 image-drift pre-pass. Skip when the recipe is inactive or
 	// when the operator pinned ManagedSA.Image explicitly — in both
 	// cases the cascade-on-parent-upgrade semantics don't apply.
-	var self SelfInfo
-	selfFetched := false
+	var selfPtr *SelfInfo
 	if w.recipe.Active() && w.recipe.Image == "" {
 		s, err := w.ops.InspectSelf(ctx)
 		if err == nil {
-			self = s
-			selfFetched = true
+			selfPtr = &s
 		} else {
 			slog.Warn("F-45 backfill self-inspect failed; skipping image-drift check",
 				"err", err)
@@ -298,63 +321,8 @@ func (w *Watcher) backfill(ctx context.Context) {
 		for _, sib := range matchSiblings(all, t) {
 			w.start(ctx, sib, t, "backfill")
 		}
-		if selfFetched {
-			// May remove the SA from `all` so the maybeManage below
-			// then takes the create-fresh path with the new image.
-			all = w.maybeRecreateStaleImageSA(ctx, all, t, self)
-		}
-		w.maybeManage(ctx, all, t, "backfill")
+		w.maybeManage(ctx, all, t, "backfill", selfPtr)
 	}
-}
-
-// maybeRecreateStaleImageSA force-removes the managed SA when it's
-// running on an image digest different from the parent's. The intent
-// is the cluster-rolling-deploy workflow: the operator pushes a new
-// anchord image, runs `docker compose pull && up`, parents restart
-// on the new digest, and any standalone (non-compose-managed) SAs
-// catch up automatically on the parent's first backfill pass.
-//
-// Returns the input `all` with the removed SA dropped so a follow-up
-// maybeManage call on the same list re-takes the create-from-scratch
-// path. Failures are logged at warn-level and the SA is left in place
-// — same robustness contract as the other F-45 mutators.
-//
-// Caller-side gating (recipe.Active(), recipe.Image=="") happens in
-// backfill before self is even fetched, so this helper assumes a
-// populated `self`.
-func (w *Watcher) maybeRecreateStaleImageSA(ctx context.Context, all []ContainerInfo, target ContainerInfo, self SelfInfo) []ContainerInfo {
-	if !targetMatchesRecipe(target, w.recipe.Target) {
-		return all
-	}
-	idx := -1
-	for i := range all {
-		if hasName(all[i], w.recipe.Name) {
-			idx = i
-			break
-		}
-	}
-	if idx == -1 {
-		return all
-	}
-	sa := all[idx]
-	if !strings.EqualFold(sa.State, "running") {
-		return all
-	}
-	if !saUsesStaleImage(sa, self, w.recipe) {
-		return all
-	}
-	slog.Info("managed service-anchor running on stale image; recreating",
-		"name", w.recipe.Name,
-		"target", w.recipe.Target,
-		"sa_image_id", sa.ImageID,
-		"parent_image_id", self.ImageID,
-		"reason", "image_drift")
-	if err := w.ops.Remove(ctx, sa.ID); err != nil {
-		slog.Warn("failed to remove stale-image managed SA; leaving in place",
-			"name", w.recipe.Name, "err", err)
-		return all
-	}
-	return append(all[:idx], all[idx+1:]...)
 }
 
 // saUsesStaleImage reports whether the managed SA is running on a
@@ -380,7 +348,9 @@ func saUsesStaleImage(sa ContainerInfo, self SelfInfo, recipe config.ManagedSARe
 
 // handleTargetStart is the per-event entry: a target just started,
 // re-scan and trigger any matching Created siblings, and run the
-// F-45 create-then-start path if the recipe applies.
+// F-45 create-then-start path if the recipe applies. Image-drift
+// check is NOT run here — that's a backfill-only concern (issue #10
+// scope: don't fight operators or noisy event sources mid-stream).
 func (w *Watcher) handleTargetStart(ctx context.Context, target ContainerInfo) {
 	all, err := w.ops.List(ctx)
 	if err != nil {
@@ -390,7 +360,7 @@ func (w *Watcher) handleTargetStart(ctx context.Context, target ContainerInfo) {
 	for _, sib := range matchSiblings(all, target) {
 		w.start(ctx, sib, target, "event")
 	}
-	w.maybeManage(ctx, all, target, "event")
+	w.maybeManage(ctx, all, target, "event", nil)
 }
 
 // handleSAGone reacts to a container "destroy" event by checking
@@ -446,7 +416,7 @@ func (w *Watcher) handleSAGone(ctx context.Context, saName string) {
 	}
 	slog.Info("managed service-anchor gone; respawning",
 		"name", w.recipe.Name, "target", w.recipe.Target, "reason", "absent")
-	w.maybeManage(ctx, all, *target, "event/sa-gone")
+	w.maybeManage(ctx, all, *target, "event/sa-gone", nil)
 }
 
 // maybeManage is the F-45 create-then-start dispatcher.
@@ -456,20 +426,29 @@ func (w *Watcher) handleSAGone(ctx context.Context, saName string) {
 // ID). Otherwise this is a no-op.
 //
 // Resolution order on a match:
-//   - If the managed service-anchor already exists AND is running →
-//     debug log, nothing to do.
-//   - If it exists in Created state → existing F-43 start path will
-//     have handled it via matchSiblings above; we skip the second
-//     create (idempotent guard).
-//   - If it doesn't exist → resolve runtime defaults
-//     (image=self.Image, gateway_ip=self IP on sharedNet), build the
-//     CreateSpec, call ops.Create then ops.Start.
+//   - SA absent → straight to createAndStartManaged.
+//   - SA running + netns target current + (self nil OR no image
+//     drift) → no-op, SA is fine as is.
+//   - SA running + netns target stale → recreate, reason=stale_netns
+//     (issue #5).
+//   - SA running + netns target current + self set + image drift →
+//     recreate, reason=image_drift (issue #8 follow-up; only on
+//     backfill where `self` is supplied).
+//   - SA in Created state → F-43 already started it; no-op.
+//   - SA in any other state → idempotent Start.
+//
+// Every recreate path enumerates wrap dependents pinned to the old
+// SA's container ID BEFORE the Remove, then rebinds each against
+// the new SA's ID after createAndStartManaged completes (issue #10).
+// Gated by `w.autoFixDeadNetns` — when false, the recreate proceeds
+// without the rebind and the dependents are left for the v1.1.0
+// dependents watcher to WARN about.
 //
 // All failures are logged at warn-level and the watcher keeps
 // running. F-45 is a quality-of-life feature; surfacing its
 // problems to the operator without killing the data plane is the
 // right tradeoff.
-func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target ContainerInfo, source string) {
+func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target ContainerInfo, source string, self *SelfInfo) {
 	if !w.recipe.Active() {
 		return
 	}
@@ -485,33 +464,43 @@ func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target C
 			break
 		}
 	}
+	oldSAID := ""
 	if existing != nil {
 		switch strings.ToLower(existing.State) {
 		case "running":
-			if !saTargetsStaleNetns(*existing, target, all) {
+			stale := saTargetsStaleNetns(*existing, target, all)
+			drift := self != nil && saUsesStaleImage(*existing, *self, w.recipe)
+			if !stale && !drift {
 				slog.Debug("managed service-anchor already running",
 					"name", w.recipe.Name, "target", w.recipe.Target)
 				return
 			}
-			// Issue #5: the SA is "running" per Docker but its netns
-			// reference resolves to a different container than the
-			// current target. Happens when an outside orchestrator
-			// (Authentik outpost controller, K8s-style operators)
-			// recreated the target — the SA is stuck on the old
-			// container's dead netns and traffic asymmetrically
-			// bypasses anchord. Force-recreate against the live
-			// target.
-			slog.Info("managed service-anchor bound to stale netns; recreating",
-				"name", w.recipe.Name,
-				"sa_netmode", existing.NetworkMode,
-				"current_target_id", target.ID,
-				"source", source)
-			if err := w.ops.Remove(ctx, existing.ID); err != nil {
-				slog.Warn("failed to remove stale managed service-anchor; will retry next event",
-					"name", w.recipe.Name, "err", err)
-				return
+			reason := "stale_netns"
+			if drift && !stale {
+				reason = "image_drift"
 			}
-			// Fall through to createAndStartManaged below.
+			logAttrs := []any{
+				"name", w.recipe.Name,
+				"target", w.recipe.Target,
+				"reason", reason,
+				"source", source,
+			}
+			if stale {
+				// Issue #5: SA's netns points at a dead/different
+				// container — Authentik outpost-controller etc.
+				// recreated the target out from under us.
+				logAttrs = append(logAttrs,
+					"sa_netmode", existing.NetworkMode,
+					"current_target_id", target.ID)
+			}
+			if drift {
+				// Issue #8 follow-up: parent on new digest, SA still on old.
+				logAttrs = append(logAttrs,
+					"sa_image_id", existing.ImageID,
+					"parent_image_id", self.ImageID)
+			}
+			slog.Info("managed service-anchor needs recreate", logAttrs...)
+			oldSAID = existing.ID
 		case "created":
 			// The F-43 path above already issued Start on this sibling
 			// (matchSiblings will have found it). No need to repeat —
@@ -525,8 +514,97 @@ func (w *Watcher) maybeManage(ctx context.Context, all []ContainerInfo, target C
 		}
 	}
 
-	// F-45 NEW path: create from recipe then start.
-	w.createAndStartManaged(ctx, target, source)
+	w.recreateSAWithOrphanRebind(ctx, all, target, source, oldSAID, existing)
+}
+
+// recreateSAWithOrphanRebind centralises the F-45 SA recreate cycle:
+//
+//   - If oldSA is non-nil and autoFixDeadNetns is on, enumerate wrap
+//     dependents pinned to the old SA's container ID.
+//   - If oldSAID is non-empty, Remove the old SA. Failure aborts the
+//     recreate so we don't end up with no SA at all.
+//   - Call createAndStartManaged to spawn the new SA.
+//   - If autoFixDeadNetns is on AND the new SA started, re-create
+//     every enumerated orphan with HostConfig.NetworkMode patched to
+//     "container:<new-SA-id>".
+//
+// Dependent recreate failures are logged at warn but never abort the
+// rest of the rebind loop — one broken dep doesn't justify leaving
+// the others orphaned.
+func (w *Watcher) recreateSAWithOrphanRebind(
+	ctx context.Context,
+	all []ContainerInfo,
+	target ContainerInfo,
+	source string,
+	oldSAID string,
+	oldSA *ContainerInfo,
+) {
+	var orphans []ContainerInfo
+	if oldSA != nil && w.autoFixDeadNetns {
+		orphans = findOrphanCandidates(all, *oldSA)
+	}
+	if oldSAID != "" {
+		if err := w.ops.Remove(ctx, oldSAID); err != nil {
+			slog.Warn("failed to remove managed service-anchor; will retry next event",
+				"name", w.recipe.Name, "err", err)
+			return
+		}
+	}
+	newID := w.createAndStartManaged(ctx, target, source)
+	if newID == "" {
+		// createAndStartManaged already logged. Orphans stay orphaned;
+		// the v1.1.0 dependents watcher will WARN about them.
+		return
+	}
+	if len(orphans) == 0 {
+		return
+	}
+	newNetMode := "container:" + newID
+	for _, dep := range orphans {
+		newDepID, err := w.ops.RecreateWithNetworkMode(ctx, dep.ID, newNetMode)
+		if err != nil {
+			slog.Warn("failed to rebind dead-netns dependent; operator must recreate manually",
+				"dependent", firstName(dep),
+				"dependent_id", dep.ID,
+				"stale_target", oldSAID,
+				"new_target", newID,
+				"err", err)
+			continue
+		}
+		slog.Info("rebound dead-netns dependent to new service-anchor",
+			"dependent", firstName(dep),
+			"old_id", dep.ID,
+			"new_id", newDepID,
+			"new_target", newID,
+			"source", source)
+	}
+}
+
+// findOrphanCandidates returns containers in `all` whose
+// `network_mode: container:<X>` reference matches the SA — by long
+// ID, short ID (>=12 chars), or any of its names. These are the
+// containers that will be in a destroyed netns once the SA is
+// Remove()'d. The SA itself is excluded from the result.
+func findOrphanCandidates(all []ContainerInfo, sa ContainerInfo) []ContainerInfo {
+	refs := referencesFor(sa)
+	if len(refs) == 0 {
+		return nil
+	}
+	var out []ContainerInfo
+	for _, c := range all {
+		if c.ID == sa.ID {
+			continue
+		}
+		ref, ok := strings.CutPrefix(c.NetworkMode, "container:")
+		if !ok {
+			continue
+		}
+		ref = strings.TrimSpace(ref)
+		if _, hit := refs[ref]; hit {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // saTargetsStaleNetns reports whether the managed SA's
@@ -561,33 +639,37 @@ func saTargetsStaleNetns(sa ContainerInfo, target ContainerInfo, all []Container
 }
 
 // createAndStartManaged inspects self for default values, assembles
-// the CreateSpec, calls Create + Start.
-func (w *Watcher) createAndStartManaged(ctx context.Context, target ContainerInfo, source string) {
+// the CreateSpec, calls Create + Start. Returns the new SA's
+// container ID on success, or "" if any step failed (caller's cue to
+// skip the orphan-rebind in the recreate path). Already-logged
+// failures aren't re-surfaced.
+func (w *Watcher) createAndStartManaged(ctx context.Context, target ContainerInfo, source string) string {
 	self, err := w.ops.InspectSelf(ctx)
 	if err != nil {
 		slog.Warn("F-45 self-inspect failed; cannot manage service-anchor",
 			"name", w.recipe.Name, "err", err)
-		return
+		return ""
 	}
 	spec, err := w.buildSpec(self)
 	if err != nil {
 		slog.Warn("F-45 recipe could not be resolved",
 			"name", w.recipe.Name, "err", err)
-		return
+		return ""
 	}
 	id, err := w.ops.Create(ctx, spec)
 	if err != nil {
 		slog.Warn("F-45 create failed",
 			"name", spec.Name, "target", w.recipe.Target, "err", err)
-		return
+		return ""
 	}
 	if err := w.ops.Start(ctx, id); err != nil {
 		slog.Warn("F-45 created but start failed",
 			"name", spec.Name, "id", id, "err", err)
-		return
+		return ""
 	}
 	slog.Info("created and started managed service-anchor",
 		"name", spec.Name, "id", id, "target", w.recipe.Target, "source", source)
+	return id
 }
 
 // buildSpec turns the recipe (plus runtime self-info) into the
@@ -874,4 +956,48 @@ func (a dockerAdapter) Events(ctx context.Context) (<-chan EventMsg, <-chan erro
 		}
 	}()
 	return msgs, errs
+}
+
+// RecreateWithNetworkMode inspects, removes, re-creates, and starts
+// a container, preserving Config and HostConfig except for the
+// NetworkMode (replaced with newNetMode). The container keeps its
+// name across the recreate so siblings that resolve it by name keep
+// working.
+//
+// Used by the F-45 dep-orphan rebind (issue #10). Failure leaves the
+// container removed but not recreated — callers are expected to log
+// and continue rather than retry blindly, so a runaway dep doesn't
+// loop the watcher.
+func (a dockerAdapter) RecreateWithNetworkMode(ctx context.Context, id, newNetMode string) (string, error) {
+	insp, err := a.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", id, err)
+	}
+	if insp.Config == nil || insp.HostConfig == nil {
+		return "", fmt.Errorf("inspect %s: missing Config or HostConfig", id)
+	}
+	// Preserve everything except the netmode pointer.
+	newHostConfig := *insp.HostConfig
+	newHostConfig.NetworkMode = container.NetworkMode(newNetMode)
+
+	// Take the bare name (strip docker's leading "/") so re-create
+	// gets the same identifier the operator + compose use.
+	name := strings.TrimPrefix(insp.Name, "/")
+
+	if err := a.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil {
+		return "", fmt.Errorf("remove %s: %w", id, err)
+	}
+	// NetworkingConfig is nil: containers in `container:X` mode share
+	// the target's namespace and don't carry separate endpoint configs
+	// (Docker forbids combining container-mode netmode with explicit
+	// network attachments). Same reason inspect.NetworkSettings.Networks
+	// is empty for wrap deps.
+	resp, err := a.cli.ContainerCreate(ctx, insp.Config, &newHostConfig, nil, nil, name)
+	if err != nil {
+		return "", fmt.Errorf("recreate %s: %w", name, err)
+	}
+	if err := a.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return "", fmt.Errorf("start recreated %s: %w", name, err)
+	}
+	return resp.ID, nil
 }

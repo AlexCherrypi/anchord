@@ -191,6 +191,29 @@ type NetworkAnchor struct {
 	// write-side socket access).
 	AutostartSiblings bool
 
+	// AutoFixDeadNetns controls whether the network-anchor, when it
+	// recreates its F-45-managed service-anchor, also re-creates any
+	// dependent containers that were netns-mode'd to the old SA's
+	// container ID. Default true.
+	//
+	// Without this, the dependents (per-stack Traefik, acme renewers,
+	// the wrapped service itself) end up running in a destroyed netns
+	// — they look running to Docker but have no interface, routes, or
+	// DNAT. anchord knows exactly which deps it's about to orphan
+	// because it knows the old SA's container ID at the moment of
+	// removal, so the scope is tight and the race-with-operator
+	// surface is essentially nil (anchord caused the orphan, anchord
+	// fixes it inline).
+	//
+	// Set to false to keep v1.1.0 behaviour (detection-only via the
+	// dependents watcher's WARN log; operator runs the recovery
+	// command manually).
+	//
+	// Requires `DELETE=1` AND container create/start endpoints on
+	// docker-socket-proxy (same as AutostartSiblings, F-45's existing
+	// recreate path needs these too).
+	AutoFixDeadNetns bool
+
 	// LabelSelector is the operator-defined set of labels a container
 	// must carry (AND-joined) to be considered a backend candidate.
 	// When non-empty it REPLACES the legacy project-label filter
@@ -294,6 +317,15 @@ func LoadNetworkAnchor() (*NetworkAnchor, error) {
 		return nil, err
 	}
 	c.AutostartSiblings = autostart
+
+	// Issue #10: dead-netns dependent auto-fix on SA recreate.
+	// Default on. Operator opts out for the v1.1.0 detection-only
+	// behaviour, or to keep narrower docker-socket-proxy permissions.
+	autofix, err := parseBoolDefault("ANCHORD_AUTOFIX_DEAD_NETNS", true)
+	if err != nil {
+		return nil, err
+	}
+	c.AutoFixDeadNetns = autofix
 
 	// F-45 managed service-anchor recipe — opt-in via TARGET. All
 	// other fields default to "fill in at runtime" if unset.

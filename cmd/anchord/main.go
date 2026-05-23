@@ -299,6 +299,9 @@ func runNetworkAnchor(ctx context.Context) error {
 		// the moment the picker settles the next create resolves
 		// against the fresh value.
 		watcher.SetSharedNetworkFunc(picker.Chosen)
+		// Issue #10: rebind wrap dependents when the SA is recreated.
+		// Opt-out via ANCHORD_AUTOFIX_DEAD_NETNS=false.
+		watcher.SetAutoFixDeadNetns(cfg.AutoFixDeadNetns)
 		if cfg.ManagedSA.Active() {
 			slog.Info("managed service-anchor recipe active",
 				"target", cfg.ManagedSA.Target,

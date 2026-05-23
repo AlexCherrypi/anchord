@@ -18,6 +18,7 @@ func clearAnchordEnv(t *testing.T) {
 		"ANCHORD_DHCP_HOSTNAME", "ANCHORD_POLL_INTERVAL",
 		"ANCHORD_DHCP_BACKOFF_MAX", "ANCHORD_LOG_LEVEL",
 		"ANCHORD_LABEL_SELECTOR", "ANCHORD_AUTOSTART_SIBLINGS",
+		"ANCHORD_AUTOFIX_DEAD_NETNS",
 		"ANCHORD_MANAGED_SA_TARGET", "ANCHORD_MANAGED_SA_NAME",
 		"ANCHORD_MANAGED_SA_IMAGE", "ANCHORD_MANAGED_SA_GATEWAY_IP",
 		"ANCHORD_MANAGED_SA_EXTRA_ENV", "ANCHORD_MANAGED_SA_LABELS",
@@ -431,6 +432,47 @@ func TestLoad_AutostartSiblings(t *testing.T) {
 			}
 			if cfg.AutostartSiblings != tc.want {
 				t.Errorf("got %v want %v", cfg.AutostartSiblings, tc.want)
+			}
+		})
+	}
+}
+
+// Issue #10: AutoFixDeadNetns defaults to true so v1.2.0 operators
+// get the recreate-cascade without opt-in. Same shape as
+// AutostartSiblings: explicit false disables, garbage is fatal.
+func TestLoad_AutoFixDeadNetns(t *testing.T) {
+	cases := []struct {
+		name    string
+		val     string
+		want    bool
+		wantErr bool
+	}{
+		{"unset → default true", "", true, false},
+		{"explicit true", "true", true, false},
+		{"explicit false", "false", false, false},
+		{"shorthand 1", "1", true, false},
+		{"shorthand 0", "0", false, false},
+		{"TRUE", "TRUE", true, false},
+		{"FALSE", "FALSE", false, false},
+		{"garbage rejected", "maybe", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAnchordEnv(t)
+			t.Setenv("ANCHORD_PROJECT", "mailcow")
+			t.Setenv("ANCHORD_AUTOFIX_DEAD_NETNS", tc.val)
+			cfg, err := LoadNetworkAnchor()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for value %q", tc.val)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if cfg.AutoFixDeadNetns != tc.want {
+				t.Errorf("got %v want %v", cfg.AutoFixDeadNetns, tc.want)
 			}
 		})
 	}

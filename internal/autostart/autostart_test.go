@@ -183,17 +183,33 @@ type fakeOps struct {
 	selfErr   error
 	selfCalls int
 
+	// Issue #10 dep-rebind path. recreates records every
+	// RecreateWithNetworkMode call as a (id, newNetMode, newID)
+	// triple. recreateErr lets tests inject failures keyed by the
+	// container ID passed in.
+	recreates    []recreateCall
+	recreateErr  map[string]error
+	recreateNewID map[string]string // optional ID-mapping for the recreate result; default = "<id>-recreated"
+
 	eventCh chan EventMsg
 	errCh   chan error
 }
 
+type recreateCall struct {
+	OldID      string
+	NewNetMode string
+	NewID      string
+}
+
 func newFakeOps(listResults []ContainerInfo) *fakeOps {
 	return &fakeOps{
-		listResults: listResults,
-		startErr:    map[string]error{},
-		removeErr:   map[string]error{},
-		eventCh:     make(chan EventMsg, 8),
-		errCh:       make(chan error, 1),
+		listResults:   listResults,
+		startErr:      map[string]error{},
+		removeErr:     map[string]error{},
+		recreateErr:   map[string]error{},
+		recreateNewID: map[string]string{},
+		eventCh:       make(chan EventMsg, 8),
+		errCh:         make(chan error, 1),
 	}
 }
 
@@ -299,6 +315,41 @@ func (f *fakeOps) removes() []string {
 	defer f.mu.Unlock()
 	out := make([]string, len(f.removedIDs))
 	copy(out, f.removedIDs)
+	return out
+}
+
+// RecreateWithNetworkMode mirrors Remove + Create + Start in one call.
+// Both successful and failed attempts are recorded so tests can
+// assert that a per-dep failure didn't abort the rebind loop. On
+// success it also updates listResults: same name, new ID, new
+// netmode (mirrors docker's name-conflict-free recreate semantics).
+func (f *fakeOps) RecreateWithNetworkMode(_ context.Context, id, newNetMode string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err, ok := f.recreateErr[id]; ok {
+		f.recreates = append(f.recreates, recreateCall{OldID: id, NewNetMode: newNetMode, NewID: ""})
+		return "", err
+	}
+	newID, ok := f.recreateNewID[id]
+	if !ok {
+		newID = id + "-recreated"
+	}
+	f.recreates = append(f.recreates, recreateCall{OldID: id, NewNetMode: newNetMode, NewID: newID})
+	for i, c := range f.listResults {
+		if c.ID == id {
+			f.listResults[i].ID = newID
+			f.listResults[i].NetworkMode = newNetMode
+			break
+		}
+	}
+	return newID, nil
+}
+
+func (f *fakeOps) recreateCalls() []recreateCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]recreateCall, len(f.recreates))
+	copy(out, f.recreates)
 	return out
 }
 
@@ -1566,6 +1617,317 @@ func TestRun_F45_ImageDriftCheckSkippedOnEvent(t *testing.T) {
 	}
 	if specs := ops.createdSpecs(); len(specs) != 0 {
 		t.Errorf("image-drift check fired on event (not backfill), got %d specs", len(specs))
+	}
+
+	cancel()
+	<-done
+}
+
+// ---- Issue #10: wrap-dep orphan rebind on SA recreate -----------------------
+
+// Predicate unit test: findOrphanCandidates picks up dependents
+// referencing the SA by long ID, short ID, and name; ignores the SA
+// itself and unrelated containers.
+func TestFindOrphanCandidates_ByAllRefForms(t *testing.T) {
+	sa := ContainerInfo{
+		ID:    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		Names: []string{"/fe-anchor-x"},
+		State: "running",
+	}
+	all := []ContainerInfo{
+		sa,
+		// Long ID
+		{ID: "dep-long", Names: []string{"/traefik"}, State: "running",
+			NetworkMode: "container:" + sa.ID},
+		// Short ID (>=12)
+		{ID: "dep-short", Names: []string{"/acme"}, State: "running",
+			NetworkMode: "container:" + sa.ID[:12]},
+		// Name
+		{ID: "dep-name", Names: []string{"/wrapped-app"}, State: "running",
+			NetworkMode: "container:fe-anchor-x"},
+		// Unrelated container with non-container netmode
+		{ID: "host-mode", Names: []string{"/whatever"}, State: "running",
+			NetworkMode: "host"},
+		// Unrelated container pointing at someone else
+		{ID: "dep-other", Names: []string{"/foreign"}, State: "running",
+			NetworkMode: "container:other-id"},
+	}
+	got := findOrphanCandidates(all, sa)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 orphans, got %d: %+v", len(got), got)
+	}
+	gotIDs := map[string]bool{}
+	for _, c := range got {
+		gotIDs[c.ID] = true
+	}
+	for _, want := range []string{"dep-long", "dep-short", "dep-name"} {
+		if !gotIDs[want] {
+			t.Errorf("missing orphan %q in result", want)
+		}
+	}
+	if gotIDs[sa.ID] {
+		t.Error("findOrphanCandidates must NOT include the SA itself")
+	}
+}
+
+// Happy path: F-45 image-drift recreate triggers, both the SA and
+// its three wrap dependents are recreated, and each dep is rebound
+// against the new SA's container ID.
+func TestBackfill_F45_ReboundDependentsOnImageDrift(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	oldSA := ContainerInfo{
+		ID:      "sa-old",
+		Names:   []string{"/ak-outpost-ldap-service-anchor"},
+		State:   "running",
+		ImageID: "sha256:OLD",
+	}
+	traefik := ContainerInfo{
+		ID:          "dep-traefik",
+		Names:       []string{"/ix-authentik-traefik-frigate-1"},
+		State:       "running",
+		NetworkMode: "container:sa-old",
+	}
+	acme := ContainerInfo{
+		ID:          "dep-acme",
+		Names:       []string{"/acme-renewer"},
+		State:       "running",
+		NetworkMode: "container:sa-old",
+	}
+	wrapped := ContainerInfo{
+		ID:          "dep-wrapped",
+		Names:       []string{"/authentik_server"},
+		State:       "running",
+		NetworkMode: "container:sa-old",
+	}
+	ops := newFakeOps([]ContainerInfo{target, oldSA, traefik, acme, wrapped})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:NEW",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "sa-fresh"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.SetAutoFixDeadNetns(true)
+	w.backfill(context.Background())
+
+	// Old SA removed exactly once.
+	if rm := ops.removes(); len(rm) != 1 || rm[0] != "sa-old" {
+		t.Errorf("expected exactly Remove(sa-old), got %v", rm)
+	}
+	// New SA created and started.
+	specs := ops.createdSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 Create for new SA, got %d", len(specs))
+	}
+	// All three deps rebound, each pointing at the new SA.
+	rec := ops.recreateCalls()
+	if len(rec) != 3 {
+		t.Fatalf("expected 3 dep rebinds, got %d: %+v", len(rec), rec)
+	}
+	rebound := map[string]string{}
+	for _, r := range rec {
+		rebound[r.OldID] = r.NewNetMode
+	}
+	for _, want := range []string{"dep-traefik", "dep-acme", "dep-wrapped"} {
+		if got, ok := rebound[want]; !ok {
+			t.Errorf("dep %q was not rebound", want)
+		} else if got != "container:sa-fresh" {
+			t.Errorf("dep %q rebound to wrong target: got %q, want container:sa-fresh", want, got)
+		}
+	}
+}
+
+// Issue #5 path (stale-netns recreate) also triggers the rebind.
+func TestRun_F45_ReboundDependentsOnStaleNetns(t *testing.T) {
+	newTarget := ContainerInfo{
+		ID:    "new-tgt-7d6c738d",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	staleSA := ContainerInfo{
+		ID:          "stale-sa-id",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:old-tgt-0f98a101",
+	}
+	traefik := ContainerInfo{
+		ID:          "dep-traefik",
+		Names:       []string{"/traefik"},
+		State:       "running",
+		NetworkMode: "container:stale-sa-id",
+	}
+	ops := newFakeOps([]ContainerInfo{newTarget, staleSA, traefik})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "fresh-sa-id"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.SetAutoFixDeadNetns(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	ops.eventCh <- EventMsg{Action: "start", ActorID: newTarget.ID, ActorName: "ak-outpost-ldap"}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(ops.recreateCalls()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	rec := ops.recreateCalls()
+	if len(rec) != 1 || rec[0].OldID != "dep-traefik" {
+		t.Errorf("expected single dep rebind of dep-traefik, got %+v", rec)
+	}
+	if rec[0].NewNetMode != "container:fresh-sa-id" {
+		t.Errorf("dep rebound to wrong target: got %q, want container:fresh-sa-id", rec[0].NewNetMode)
+	}
+
+	cancel()
+	<-done
+}
+
+// Opt-out invariant: with SetAutoFixDeadNetns(false), the SA recreate
+// proceeds as in v1.1.0 — but no RecreateWithNetworkMode call is
+// issued. Dependents are left orphaned for the v1.1.0 watcher's
+// WARN logs.
+func TestBackfill_F45_NoRebindWhenAutoFixDisabled(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	oldSA := ContainerInfo{
+		ID:      "sa-old",
+		Names:   []string{"/ak-outpost-ldap-service-anchor"},
+		State:   "running",
+		ImageID: "sha256:OLD",
+	}
+	dep := ContainerInfo{
+		ID:          "dep-traefik",
+		Names:       []string{"/traefik"},
+		State:       "running",
+		NetworkMode: "container:sa-old",
+	}
+	ops := newFakeOps([]ContainerInfo{target, oldSA, dep})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:NEW",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "sa-fresh"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.SetAutoFixDeadNetns(false)
+	w.backfill(context.Background())
+
+	// SA still recreated.
+	if specs := ops.createdSpecs(); len(specs) != 1 {
+		t.Errorf("SA should still be recreated even with AutoFix=false; got %d Create calls", len(specs))
+	}
+	// But NO dep rebind.
+	if rec := ops.recreateCalls(); len(rec) != 0 {
+		t.Errorf("AutoFix=false must not trigger dep rebinds, got %d: %+v", len(rec), rec)
+	}
+}
+
+// SA-absent path: orphans pointing at an old ID we don't know about
+// are NOT rebound — we only act on deps pinned to the SA WE just
+// removed. (The v1.1.0 dependents watcher catches these.)
+func TestBackfill_F45_NoRebindOnAbsentSA(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	// No SA in the list — F-45 absent path. Some random orphan
+	// pointing at a long-dead container that we never managed.
+	staleDep := ContainerInfo{
+		ID:          "stale-dep",
+		Names:       []string{"/traefik"},
+		State:       "running",
+		NetworkMode: "container:long-dead-id",
+	}
+	ops := newFakeOps([]ContainerInfo{target, staleDep})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:X",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "sa-fresh"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.SetAutoFixDeadNetns(true)
+	w.backfill(context.Background())
+
+	if rec := ops.recreateCalls(); len(rec) != 0 {
+		t.Errorf("absent-SA create must not rebind unrelated orphans, got %+v", rec)
+	}
+}
+
+// Dep rebind failure for one container must NOT abort the loop —
+// remaining orphans still get their chance.
+func TestRun_F45_RebindContinuesAfterPerDepFailure(t *testing.T) {
+	newTarget := ContainerInfo{
+		ID:    "new-tgt",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	staleSA := ContainerInfo{
+		ID:          "stale-sa-id",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:old-tgt",
+	}
+	depA := ContainerInfo{
+		ID:          "dep-fail",
+		Names:       []string{"/traefik-fail"},
+		State:       "running",
+		NetworkMode: "container:stale-sa-id",
+	}
+	depB := ContainerInfo{
+		ID:          "dep-ok",
+		Names:       []string{"/traefik-ok"},
+		State:       "running",
+		NetworkMode: "container:stale-sa-id",
+	}
+	ops := newFakeOps([]ContainerInfo{newTarget, staleSA, depA, depB})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "fresh-sa"
+	ops.recreateErr["dep-fail"] = errors.New("ContainerCreate: name in use")
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.SetAutoFixDeadNetns(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	ops.eventCh <- EventMsg{Action: "start", ActorID: newTarget.ID, ActorName: "ak-outpost-ldap"}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(ops.recreateCalls()) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	rec := ops.recreateCalls()
+	if len(rec) != 2 {
+		t.Fatalf("loop aborted after dep-fail; expected 2 recreate calls, got %d: %+v", len(rec), rec)
 	}
 
 	cancel()
