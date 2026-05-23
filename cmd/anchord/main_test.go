@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/AlexCherrypi/anchord/internal/dependents"
 )
 
 // F-42 precedence resolution: selector wins, project is informational
@@ -139,6 +143,12 @@ func TestSelectMode(t *testing.T) {
 			envMode: "wat",
 			wantErr: "unknown mode",
 		},
+		{
+			name:    "doctor subcommand recognised",
+			args:    []string{"anchord", "doctor", "stale-netns"},
+			envMode: "",
+			want:    ModeDoctor,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,5 +166,108 @@ func TestSelectMode(t *testing.T) {
 				t.Errorf("got %q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// runDoctor dispatch surface: empty args prints usage and returns
+// nil; unknown subcommand returns an error. The actual stale-netns
+// run touches docker.sock and isn't unit-testable here — its
+// rendering is covered by TestPrintStaleReport below and the
+// underlying scan logic by internal/dependents.
+func TestRunDoctor_Dispatch(t *testing.T) {
+	t.Run("no args prints usage", func(t *testing.T) {
+		err := runDoctor(context.Background(), nil)
+		if err != nil {
+			t.Errorf("no-args usage should succeed, got %v", err)
+		}
+	})
+	t.Run("unknown subcommand errors", func(t *testing.T) {
+		err := runDoctor(context.Background(), []string{"unknown-thing"})
+		if err == nil || !strings.Contains(err.Error(), "unknown doctor subcommand") {
+			t.Errorf("got err=%v, want error mentioning unknown subcommand", err)
+		}
+	})
+	t.Run("--help is not an error", func(t *testing.T) {
+		err := runDoctor(context.Background(), []string{"--help"})
+		if err != nil {
+			t.Errorf("--help should succeed, got %v", err)
+		}
+	})
+}
+
+// Stale-netns rendering: grouped by dead target, sorted, includes
+// the compose hint when present.
+func TestPrintStaleReport(t *testing.T) {
+	stale := []dependents.StaleNetns{
+		{
+			Container:   dependents.Container{ID: "id-traefik-frigate", Names: []string{"/ix-authentik-traefik-frigate-1"}},
+			StaleTarget: "158f0cc2",
+			ComposeHint: "docker compose -p ix-authentik up -d --no-deps --force-recreate traefik-frigate",
+		},
+		{
+			Container:   dependents.Container{ID: "id-authentik-server", Names: []string{"/authentik_server"}},
+			StaleTarget: "2a8f83ad",
+			ComposeHint: "docker compose -p ix-authentik up -d --no-deps --force-recreate authentik_server",
+		},
+		{
+			Container:   dependents.Container{ID: "id-traefik-nc", Names: []string{"/ix-nextcloud-traefik-nextcloud-1"}},
+			StaleTarget: "74a219e7",
+			ComposeHint: "docker compose -p ix-nextcloud up -d --no-deps --force-recreate traefik-nextcloud",
+		},
+		// Two victims for the same dead target — they must cluster.
+		{
+			Container:   dependents.Container{ID: "id-acme-1", Names: []string{"/acme-renewer-xibo"}},
+			StaleTarget: "a7c53426",
+			ComposeHint: "docker compose -p ix-xibo up -d --no-deps --force-recreate acme-renewer-xibo",
+		},
+		{
+			Container:   dependents.Container{ID: "id-xibo-traefik", Names: []string{"/ix-xibo-traefik-1"}},
+			StaleTarget: "a7c53426",
+			ComposeHint: "docker compose -p ix-xibo up -d --no-deps --force-recreate traefik",
+		},
+		// Victim without compose labels — must still be listed but
+		// without a hint.
+		{
+			Container:   dependents.Container{ID: "id-manual", Names: []string{"/manually-docker-run-ed"}},
+			StaleTarget: "ffffffff",
+			ComposeHint: "",
+		},
+	}
+	var buf bytes.Buffer
+	printStaleReport(&buf, stale)
+	out := buf.String()
+
+	// Header is correct (6 victims across 5 distinct targets).
+	if !strings.Contains(out, "Found 6 dependent(s) in dead netns across 5 target(s):") {
+		t.Errorf("missing or wrong header line; got:\n%s", out)
+	}
+	// Each distinct dead target appears.
+	for _, tgt := range []string{"158f0cc2", "2a8f83ad", "74a219e7", "a7c53426", "ffffffff"} {
+		if !strings.Contains(out, "dead target: "+tgt) {
+			t.Errorf("missing target %q in output:\n%s", tgt, out)
+		}
+	}
+	// The two victims of a7c53426 must cluster: their names appear
+	// without an intervening "dead target:" line between them.
+	idxA := strings.Index(out, "acme-renewer-xibo")
+	idxB := strings.Index(out, "ix-xibo-traefik-1")
+	idxNextDeadTarget := strings.Index(out[idxA:], "dead target:")
+	if idxA < 0 || idxB < 0 {
+		t.Fatalf("expected both xibo victims in output, got:\n%s", out)
+	}
+	if idxNextDeadTarget != -1 && idxA+idxNextDeadTarget < idxB {
+		t.Errorf("victims of same dead target did not cluster; got:\n%s", out)
+	}
+	// Compose hint included where present.
+	if !strings.Contains(out, "→ docker compose -p ix-authentik up -d --no-deps --force-recreate authentik_server") {
+		t.Errorf("missing compose hint for authentik_server; got:\n%s", out)
+	}
+	// Victim without compose hint is still listed.
+	if !strings.Contains(out, "manually-docker-run-ed") {
+		t.Errorf("hint-less victim missing from report; got:\n%s", out)
+	}
+	// And does NOT carry an empty " → " stub.
+	if strings.Contains(out, "manually-docker-run-ed\n      → ") {
+		t.Errorf("hint-less victim should not have empty arrow; got:\n%s", out)
 	}
 }

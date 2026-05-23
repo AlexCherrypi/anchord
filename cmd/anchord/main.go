@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -29,8 +30,11 @@ import (
 
 	"net/http"
 
+	"github.com/docker/docker/api/types/container"
+
 	"github.com/AlexCherrypi/anchord/internal/autostart"
 	"github.com/AlexCherrypi/anchord/internal/config"
+	"github.com/AlexCherrypi/anchord/internal/dependents"
 	"github.com/AlexCherrypi/anchord/internal/dhcp"
 	"github.com/AlexCherrypi/anchord/internal/discovery"
 	"github.com/AlexCherrypi/anchord/internal/extiface"
@@ -51,6 +55,12 @@ type Mode string
 const (
 	ModeNetworkAnchor Mode = "network-anchor"
 	ModeServiceAnchor Mode = "service-anchor"
+	// ModeDoctor is the operator-facing one-shot diagnostic mode
+	// added in v1.1.0 (issue #9). Currently a single subcommand
+	// `stale-netns` that prints dependents in dead network
+	// namespaces. Doctor mode does not need ANCHORD_* daemon config
+	// — it speaks docker.sock and exits.
+	ModeDoctor Mode = "doctor"
 )
 
 func main() {
@@ -88,6 +98,9 @@ func run() error {
 	switch mode {
 	case ModeServiceAnchor:
 		return runServiceAnchor(ctx)
+	case ModeDoctor:
+		// args[0]=binary, args[1]=doctor, args[2..]=subcommand+flags.
+		return runDoctor(ctx, os.Args[2:])
 	default:
 		return runNetworkAnchor(ctx)
 	}
@@ -110,11 +123,11 @@ func selectMode(args []string, envMode string) (Mode, error) {
 		return ModeNetworkAnchor, nil
 	}
 	switch Mode(mode) {
-	case ModeNetworkAnchor, ModeServiceAnchor:
+	case ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor:
 		return Mode(mode), nil
 	default:
-		return "", fmt.Errorf("unknown mode %q (want %q or %q)",
-			mode, ModeNetworkAnchor, ModeServiceAnchor)
+		return "", fmt.Errorf("unknown mode %q (want %q, %q, or %q)",
+			mode, ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor)
 	}
 }
 
@@ -305,10 +318,129 @@ func runNetworkAnchor(ctx context.Context) error {
 		slog.Info("sibling auto-start disabled (ANCHORD_AUTOSTART_SIBLINGS=false)")
 	}
 
-	// 7. Reconciler — the main loop.
+	// 7. Dead-netns dependent detector (issue #9) — detection-only.
+	//    Walks all containers in our compose project every poll
+	//    interval and emits a structured WARN per dependent whose
+	//    network_mode: container:<ID> reference no longer resolves.
+	//    Disabled (no-op Run) when no compose project scope is
+	//    configured, so F-42 label-selector deployments don't have
+	//    every anchord instance broadcast the same victims.
+	depWatcher := dependents.New(cli, cfg.ComposeProject, cfg.PollInterval)
+	go func() {
+		if err := depWatcher.Run(cancelCtx); err != nil && cancelCtx.Err() == nil {
+			slog.Error("dead-netns watcher exited", "err", err)
+			// Detection is observability, not data-plane critical.
+			// Loss is logged, not fatal.
+		}
+	}()
+
+	// 8. Reconciler — the main loop.
 	rec := reconciler.New(natMgr)
 	rec.OnReconciled = tracker.MarkReconciled
 	return rec.Run(cancelCtx, disc.Updates())
+}
+
+// runDoctor is the operator-facing one-shot diagnostic mode. Does
+// not load ANCHORD_* daemon config; just speaks docker.sock and
+// exits. Subcommands are routed by the first argument.
+//
+//	anchord doctor stale-netns
+//	  Reports dependents in dead network namespaces (issue #9).
+func runDoctor(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		return doctorUsage(os.Stderr)
+	}
+	switch args[0] {
+	case "stale-netns":
+		return runDoctorStaleNetns(ctx, args[1:])
+	default:
+		_ = doctorUsage(os.Stderr)
+		return fmt.Errorf("unknown doctor subcommand %q", args[0])
+	}
+}
+
+func doctorUsage(w io.Writer) error {
+	fmt.Fprintln(w, "Usage: anchord doctor <subcommand>")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Subcommands:")
+	fmt.Fprintln(w, "  stale-netns   Report dependents in dead network namespaces (issue #9).")
+	return nil
+}
+
+// runDoctorStaleNetns scans every container on the host (no scope)
+// and prints dependents whose `network_mode: container:<id>` no
+// longer resolves. The intended workflow is post-mortem during a
+// production incident, so the output is human-readable and grouped
+// by dead target — a single dead service-anchor typically has many
+// victims and the operator wants to see them clustered.
+func runDoctorStaleNetns(ctx context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("doctor stale-netns: unexpected arguments %v", args)
+	}
+	cli, err := client.NewClientWithOpts(
+		client.FromEnv,
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer cli.Close()
+
+	list, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("ContainerList: %w", err)
+	}
+	all := make([]dependents.Container, 0, len(list))
+	for _, c := range list {
+		all = append(all, dependents.Container{
+			ID:          c.ID,
+			Names:       c.Names,
+			State:       c.State,
+			NetworkMode: c.HostConfig.NetworkMode,
+			Labels:      c.Labels,
+		})
+	}
+	stale := dependents.Find(all, all)
+	if len(stale) == 0 {
+		fmt.Println("No dead-netns dependents found.")
+		return nil
+	}
+	printStaleReport(os.Stdout, stale)
+	return nil
+}
+
+// printStaleReport renders the doctor stale-netns output. Grouped by
+// dead target so victims of the same gone SA cluster, sorted by
+// stable identifiers (stable across runs makes diff-against-yesterday
+// possible during a long-running incident).
+func printStaleReport(w io.Writer, stale []dependents.StaleNetns) {
+	byTarget := map[string][]dependents.StaleNetns{}
+	for _, s := range stale {
+		byTarget[s.StaleTarget] = append(byTarget[s.StaleTarget], s)
+	}
+	targets := make([]string, 0, len(byTarget))
+	for t := range byTarget {
+		targets = append(targets, t)
+	}
+	sort.Strings(targets)
+
+	fmt.Fprintf(w, "Found %d dependent(s) in dead netns across %d target(s):\n\n",
+		len(stale), len(targets))
+	for _, t := range targets {
+		victims := byTarget[t]
+		sort.Slice(victims, func(i, j int) bool {
+			return dependents.FirstName(victims[i].Container) <
+				dependents.FirstName(victims[j].Container)
+		})
+		fmt.Fprintf(w, "  dead target: %s  (%d victim(s))\n", t, len(victims))
+		for _, v := range victims {
+			fmt.Fprintf(w, "    %s\n", dependents.FirstName(v.Container))
+			if v.ComposeHint != "" {
+				fmt.Fprintf(w, "      → %s\n", v.ComposeHint)
+			}
+		}
+		fmt.Fprintln(w)
+	}
 }
 
 // runServiceAnchor maintains a default route in the local namespace

@@ -432,6 +432,45 @@ Same listener, plain text:
 Both `/readyz` variants return `503` with the unmet conditions in the
 body while not ready.
 
+## Operator tooling
+
+### `anchord doctor stale-netns`
+
+One-shot diagnostic for the wrap-pattern failure mode tracked in
+[issue #9](https://github.com/AlexCherrypi/anchord/issues/9): when a
+service-anchor is recreated, every container declaring
+`network_mode: service:<that-anchor>` stays pinned to the old
+container ID and runs in a netns Docker has destroyed. The
+dependents look `running` to Docker but have no interface, no routes,
+no DNAT.
+
+```
+$ anchord doctor stale-netns
+Found 11 dependent(s) in dead netns across 9 target(s):
+
+  dead target: 158f0cc2  (1 victim(s))
+    ix-authentik-traefik-frigate-1
+      → docker compose -p ix-authentik up -d --no-deps --force-recreate traefik-frigate
+
+  dead target: a7c53426  (3 victim(s))
+    acme-init-xibo
+    acme-renewer-xibo
+    ix-xibo-traefik-1
+      → docker compose -p ix-xibo up -d --no-deps --force-recreate traefik
+  ...
+```
+
+Scans the whole host, no compose project scope, no ANCHORD_*
+configuration needed — just docker.sock. Output is grouped by dead
+target so victims of the same gone service-anchor cluster, with the
+exact compose command to recover each.
+
+When anchord runs in network-anchor mode it also performs the same
+detection in the background (scoped to its own compose project) and
+emits a structured `WARN dependent in dead netns ...` for every new
+victim. The doctor command is for ad-hoc cluster-wide scans (anchord
+not running, a different host, post-mortem analysis).
+
 ## Caveats and known limitations
 
 - **Kernel ≥ 4.18** required for atomic nftables map replaces.
@@ -442,6 +481,17 @@ body while not ready.
   Default is `anchord`, which matches the canonical service name in the
   example compose. If you rename the network-anchor service, set
   `ANCHORD_GATEWAY_HOSTNAME` on each service-anchor to match.
+- **Recreating a service-anchor orphans its wrap dependents.** Any
+  container declaring `network_mode: service:fe-anchor-X` is pinned
+  to fe-anchor-X's container ID at create-time and stays pinned
+  across recreate. After
+  `docker compose up -d --no-deps --force-recreate fe-anchor-X` (or
+  any `docker rm` of the SA), recreate every dependent in the same
+  stack — typically the per-stack Traefik plus any acme/wrap services
+  netns-mode'd to the same fe-anchor. anchord detects the situation
+  and emits a `WARN dependent in dead netns ...` log line per victim,
+  but it does not (yet) auto-recreate. Use
+  `anchord doctor stale-netns` for a cluster-wide one-shot scan.
 - **One network-anchor per backend identity.** Default discovery
   scope is the Compose project; two anchords filtering the same set
   of backends will fight over their DNAT entries. With
@@ -467,8 +517,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-23T12:17:40Z
-- **Code hash:** `sha256:ff61d6d5841925175fab37db9bc19b5e5e06da4406f82a3f3f15f4c5f6c87d26`
+- **Last verified:** 2026-05-23T12:40:09Z
+- **Code hash:** `sha256:f410fde3ae08f2c73c1d596c77a7f708702debde96ace1b7a9fa0e51b93caca7`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -476,12 +526,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 280 | 0 | 0 | 280 |
+| Go unit tests | 301 | 0 | 0 | 301 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **354** | **0** | **0** | **354** |
+| **All tests** | **375** | **0** | **0** | **375** |
 
 <details>
-<summary>Go unit tests &mdash; 280/280 passed</summary>
+<summary>Go unit tests &mdash; 301/301 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -491,7 +541,12 @@ release-readiness signal.
 | `cmd/anchord` | `TestBuildDiscoveryDiscriminator/selector_alone` | ✓ |
 | `cmd/anchord` | `TestBuildDiscoveryDiscriminator/selector_replaces_project_(both_set,_both_ignored_on_selector_path)` | ✓ |
 | `cmd/anchord` | `TestBuildDiscoveryDiscriminator_Deterministic` | ✓ |
+| `cmd/anchord` | `TestPrintStaleReport` | ✓ |
+| `cmd/anchord` | `TestRunDoctor_Dispatch/--help_is_not_an_error` | ✓ |
+| `cmd/anchord` | `TestRunDoctor_Dispatch/no_args_prints_usage` | ✓ |
+| `cmd/anchord` | `TestRunDoctor_Dispatch/unknown_subcommand_errors` | ✓ |
 | `cmd/anchord` | `TestSelectMode/ANCHORD_MODE=service-anchor` | ✓ |
+| `cmd/anchord` | `TestSelectMode/doctor_subcommand_recognised` | ✓ |
 | `cmd/anchord` | `TestSelectMode/explicit_network-anchor_subcommand` | ✓ |
 | `cmd/anchord` | `TestSelectMode/flag-only_args_are_ignored` | ✓ |
 | `cmd/anchord` | `TestSelectMode/no_args,_no_env_->_default_network-anchor` | ✓ |
@@ -631,6 +686,22 @@ release-readiness signal.
 | `internal/conntrack` | `TestFlushDestination_NonzeroExitIsSilent` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_V4Command` | ✓ |
 | `internal/conntrack` | `TestFlushDestination_V6Command` | ✓ |
+| `internal/dependents` | `TestFind_DeadRef` | ✓ |
+| `internal/dependents` | `TestFind_EmptyRefSkipped` | ✓ |
+| `internal/dependents` | `TestFind_LiveRefByLongID` | ✓ |
+| `internal/dependents` | `TestFind_LiveRefByName` | ✓ |
+| `internal/dependents` | `TestFind_LiveRefByShortID` | ✓ |
+| `internal/dependents` | `TestFind_ManyDependentsOnOneDeadTarget` | ✓ |
+| `internal/dependents` | `TestFind_NoComposeHintWhenLabelsMissing` | ✓ |
+| `internal/dependents` | `TestFind_NonContainerNetworkModesIgnored` | ✓ |
+| `internal/dependents` | `TestFind_RefToStoppedContainerIsLive` | ✓ |
+| `internal/dependents` | `TestFirstName` | ✓ |
+| `internal/dependents` | `TestRun_EmptyScopeIsNoOpAndExitsOnCtx` | ✓ |
+| `internal/dependents` | `TestTick_DoesNotReReportSameVictim` | ✓ |
+| `internal/dependents` | `TestTick_ListFailureToleratedNoVictims` | ✓ |
+| `internal/dependents` | `TestTick_ReReportsWhenVictimReturnsAfterFix` | ✓ |
+| `internal/dependents` | `TestTick_ReportsNewVictim` | ✓ |
+| `internal/dependents` | `TestTick_ScopeFiltersByComposeProject` | ✓ |
 | `internal/dhcp` | `TestClientID_PrefixesType` | ✓ |
 | `internal/dhcp` | `TestClientID_StableAcrossCalls` | ✓ |
 | `internal/dhcp` | `TestExtractV6Addrs_NoIANAYieldsNil` | ✓ |
@@ -788,11 +859,11 @@ release-readiness signal.
 | `v4-only` | S-6 logs show graceful shutdown | ✓ |
 | `v4-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `v6-only` | anchord container running | ✓ |
-| `v6-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `v6-only` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `v6-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v6-only` | nftables anchord_v4 table installed | ✓ |
 | `v6-only` | nftables anchord_v6 table installed | ✓ |
-| `v6-only` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `v6-only` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `v6-only` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `v6-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v6-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
@@ -802,12 +873,12 @@ release-readiness signal.
 | `v6-only` | S-6 logs show graceful shutdown | ✓ |
 | `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `both` | anchord container running | ✓ |
-| `both` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `both` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `both` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `both` | nftables anchord_v4 table installed | ✓ |
 | `both` | nftables anchord_v6 table installed | ✓ |
-| `both` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
-| `both` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `both` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `both` | S-2 (v4) source IP preserved through DNAT | ✓ |
