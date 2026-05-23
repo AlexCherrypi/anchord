@@ -1167,6 +1167,411 @@ func TestRun_F45_NoRecreateWhenSANetnsCurrent(t *testing.T) {
 	<-done
 }
 
+// Issue #8: when the managed SA is removed at runtime (e.g.
+// `docker rm -f` during an image upgrade) while the target keeps
+// running, the watcher must respawn the SA. Pre-fix the watcher
+// only listened to "start" events, so this scenario was invisible.
+func TestRun_F45_RecreatesSAOnDestroy(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	priorSA := ContainerInfo{
+		ID:    "sa-prior",
+		Names: []string{"/ak-outpost-ldap-service-anchor"},
+		State: "running",
+	}
+	// State at fixture: both target and SA running.
+	ops := newFakeOps([]ContainerInfo{target, priorSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "sa-fresh"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// Wait for backfill (1 list call) so the watcher's startup pass
+	// finishes before we mutate fixture state.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ops.mu.Lock()
+		seen := ops.listCalls
+		ops.mu.Unlock()
+		if seen >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Simulate `docker rm -f`: SA disappears from the daemon's list,
+	// then a destroy event fires.
+	ops.mu.Lock()
+	ops.listResults = []ContainerInfo{target}
+	ops.mu.Unlock()
+	ops.eventCh <- EventMsg{
+		Action:    "destroy",
+		ActorID:   priorSA.ID,
+		ActorName: "ak-outpost-ldap-service-anchor",
+	}
+
+	// Watcher should re-list, find SA absent, and create + start a
+	// fresh one against the still-running target.
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(ops.createdSpecs()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	specs := ops.createdSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 Create after SA destroy, got %d (specs=%+v)", len(specs), specs)
+	}
+	if specs[0].Name != "ak-outpost-ldap-service-anchor" {
+		t.Errorf("respawned SA name: got %q, want ak-outpost-ldap-service-anchor", specs[0].Name)
+	}
+	if specs[0].NetworkMode != "container:ak-outpost-ldap" {
+		t.Errorf("respawned SA NetworkMode: got %q, want container:ak-outpost-ldap", specs[0].NetworkMode)
+	}
+	foundFreshStart := false
+	for _, id := range ops.starts() {
+		if id == "sa-fresh" {
+			foundFreshStart = true
+			break
+		}
+	}
+	if !foundFreshStart {
+		t.Errorf("Start was not called on fresh SA id; starts=%v", ops.starts())
+	}
+
+	cancel()
+	<-done
+}
+
+// Issue #8 guard: when the SA is destroyed but the configured target
+// is also gone (full stack teardown, not just an SA upgrade), the
+// watcher must NOT respawn the SA — that would fight a shutdown we
+// don't own and leave a half-started container behind.
+func TestRun_F45_NoRespawnIfTargetAlsoGone(t *testing.T) {
+	priorSA := ContainerInfo{
+		ID:    "sa-prior",
+		Names: []string{"/ak-outpost-ldap-service-anchor"},
+		State: "running",
+	}
+	// No target in the fixture: simulates the stack being torn down.
+	ops := newFakeOps([]ContainerInfo{priorSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// Wait for backfill.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ops.mu.Lock()
+		seen := ops.listCalls
+		ops.mu.Unlock()
+		if seen >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// SA gets destroyed; meanwhile target is also gone (never was in
+	// the list to begin with).
+	ops.mu.Lock()
+	ops.listResults = nil
+	ops.mu.Unlock()
+	ops.eventCh <- EventMsg{
+		Action:    "destroy",
+		ActorID:   priorSA.ID,
+		ActorName: "ak-outpost-ldap-service-anchor",
+	}
+
+	// Settle.
+	time.Sleep(80 * time.Millisecond)
+
+	if specs := ops.createdSpecs(); len(specs) != 0 {
+		t.Errorf("must not respawn SA when target is gone; got %d Create calls", len(specs))
+	}
+
+	cancel()
+	<-done
+}
+
+// Issue #8 guard: destroy events for unrelated containers must be
+// silently ignored. The watcher only acts when the destroyed name
+// matches the recipe's managed SA.
+func TestRun_F45_IgnoresDestroyOfUnrelatedContainer(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	managedSA := ContainerInfo{
+		ID:    "sa-id",
+		Names: []string{"/ak-outpost-ldap-service-anchor"},
+		State: "running",
+	}
+	ops := newFakeOps([]ContainerInfo{target, managedSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:test",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// Wait for backfill.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ops.mu.Lock()
+		seen := ops.listCalls
+		ops.mu.Unlock()
+		if seen >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	backfillLists := func() int {
+		ops.mu.Lock()
+		defer ops.mu.Unlock()
+		return ops.listCalls
+	}()
+
+	// Destroy event for some other container the operator removed.
+	ops.eventCh <- EventMsg{
+		Action:    "destroy",
+		ActorID:   "some-other-id",
+		ActorName: "unrelated-container",
+	}
+
+	time.Sleep(80 * time.Millisecond)
+
+	if specs := ops.createdSpecs(); len(specs) != 0 {
+		t.Errorf("destroy of unrelated container must not trigger Create; got %d", len(specs))
+	}
+	// Also: the watcher should not have done an extra List for the
+	// unrelated destroy (early-return before the List call).
+	ops.mu.Lock()
+	after := ops.listCalls
+	ops.mu.Unlock()
+	if after != backfillLists {
+		t.Errorf("unrelated destroy caused extra List call (%d → %d) — should short-circuit on name mismatch",
+			backfillLists, after)
+	}
+
+	cancel()
+	<-done
+}
+
+// Issue #8 follow-up: when the parent (network-anchor) restarts on a
+// new image digest, the managed SA still running on the old digest
+// must be force-recreated against the new one. This is the
+// cluster-rolling-deploy cascade — operators push a new anchord
+// image, parents restart, standalone (non-compose-managed) SAs catch
+// up automatically.
+//
+// Tag-floats like `:main` keep the same name across pushes; the check
+// must therefore compare by sha256 digest, not by tag string.
+func TestBackfill_F45_RecreatesSAOnImageDrift(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	oldSA := ContainerInfo{
+		ID:      "sa-old",
+		Names:   []string{"/ak-outpost-ldap-service-anchor"},
+		State:   "running",
+		ImageID: "sha256:OLD",
+	}
+	ops := newFakeOps([]ContainerInfo{target, oldSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:NEW",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+	ops.createNewID = "sa-fresh"
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.backfill(context.Background())
+
+	rm := ops.removes()
+	if len(rm) != 1 || rm[0] != "sa-old" {
+		t.Errorf("expected stale-image SA to be removed exactly once, got %v", rm)
+	}
+	specs := ops.createdSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("expected exactly 1 Create after image-drift recreate, got %d", len(specs))
+	}
+	if specs[0].Name != "ak-outpost-ldap-service-anchor" {
+		t.Errorf("recreated SA name: got %q, want ak-outpost-ldap-service-anchor", specs[0].Name)
+	}
+	if specs[0].Image != "anchord:main" {
+		t.Errorf("recreated SA must use parent's current image; got %q", specs[0].Image)
+	}
+}
+
+// Image-drift guard: when parent and SA share the same digest, no
+// churn. Same fixture as the drift case but with matching ImageIDs.
+func TestBackfill_F45_NoRecreateWhenImagesMatch(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	sa := ContainerInfo{
+		ID:          "sa-id",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:tgt-abc",
+		ImageID:     "sha256:SAME",
+	}
+	ops := newFakeOps([]ContainerInfo{target, sa})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:SAME",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	w.backfill(context.Background())
+
+	if rm := ops.removes(); len(rm) != 0 {
+		t.Errorf("matching-image SA must not be removed, got %v", rm)
+	}
+	if specs := ops.createdSpecs(); len(specs) != 0 {
+		t.Errorf("matching-image SA must not be recreated, got %d specs", len(specs))
+	}
+}
+
+// Image-drift override: when the recipe pins ManagedSA.Image
+// explicitly, the operator's choice wins. The cascade must NOT fire
+// even on a digest mismatch — otherwise we'd fight the explicit pin.
+func TestBackfill_F45_NoImageCheckWhenRecipePinsImage(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	sa := ContainerInfo{
+		ID:          "sa-id",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:tgt-abc",
+		ImageID:     "sha256:OLD",
+	}
+	ops := newFakeOps([]ContainerInfo{target, sa})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:NEW",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+
+	recipe := managedRecipe("ak-outpost-ldap")
+	recipe.Image = "ghcr.io/lk/anchord:v0.9.0" // operator-pinned
+	w := newWithOpsAndRecipe(ops, recipe, "transit")
+	w.backfill(context.Background())
+
+	if rm := ops.removes(); len(rm) != 0 {
+		t.Errorf("pinned-image SA must not be auto-recreated on parent drift, got %v", rm)
+	}
+	if specs := ops.createdSpecs(); len(specs) != 0 {
+		t.Errorf("pinned-image SA must not be recreated, got %d specs", len(specs))
+	}
+}
+
+// Backfill-only invariant: the image-drift check fires once at parent
+// startup and never on subsequent target-start events. Without this,
+// a noisy event source could trigger churning recreates and an
+// operator running `docker run --image other-anchord` to test
+// something would fight us on every event.
+func TestRun_F45_ImageDriftCheckSkippedOnEvent(t *testing.T) {
+	target := ContainerInfo{
+		ID:    "tgt-abc",
+		Names: []string{"/ak-outpost-ldap"},
+		State: "running",
+	}
+	staleSA := ContainerInfo{
+		ID:          "sa-stale",
+		Names:       []string{"/ak-outpost-ldap-service-anchor"},
+		State:       "running",
+		NetworkMode: "container:tgt-abc",
+		ImageID:     "sha256:OLD",
+	}
+	// Pre-condition: backfill has ALREADY run when we set up. Simulate
+	// by starting the watcher with fixture state where the SA was
+	// already there pre-backfill on the SAME image as parent — so
+	// backfill is a no-op — and THEN, after Run is going, mutate the
+	// SA's image to "stale" via the fake's listResults. The follow-up
+	// target-start event must NOT trigger recreate.
+	matchingSA := staleSA
+	matchingSA.ImageID = "sha256:SAME"
+	ops := newFakeOps([]ContainerInfo{target, matchingSA})
+	ops.selfInfo = SelfInfo{
+		Image:        "anchord:main",
+		ImageID:      "sha256:SAME",
+		IPsByNetwork: map[string]string{"transit": "10.0.0.5"},
+	}
+
+	w := newWithOpsAndRecipe(ops, managedRecipe("ak-outpost-ldap"), "transit")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// Wait for backfill to complete (1 List call).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ops.mu.Lock()
+		seen := ops.listCalls
+		ops.mu.Unlock()
+		if seen >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Now flip the SA's image to OLD in the listResults — as if the
+	// SA had drifted post-backfill.
+	ops.mu.Lock()
+	ops.listResults = []ContainerInfo{target, staleSA}
+	ops.mu.Unlock()
+
+	// Fire a target-start event. This is the F-45 startup path for
+	// the event source, NOT backfill — image-drift check must NOT
+	// run here.
+	ops.eventCh <- EventMsg{Action: "start", ActorID: target.ID, ActorName: "ak-outpost-ldap"}
+
+	time.Sleep(80 * time.Millisecond)
+
+	if rm := ops.removes(); len(rm) != 0 {
+		t.Errorf("image-drift check fired on event (not backfill), got removes=%v", rm)
+	}
+	if specs := ops.createdSpecs(); len(specs) != 0 {
+		t.Errorf("image-drift check fired on event (not backfill), got %d specs", len(specs))
+	}
+
+	cancel()
+	<-done
+}
+
 // F-45: Create failure must be logged and the loop must continue
 // (same robustness contract as Start failures).
 func TestRun_F45_CreateErrorTolerated(t *testing.T) {

@@ -54,13 +54,26 @@ type ContainerInfo struct {
 	Names       []string
 	State       string // "created", "running", "exited", …
 	NetworkMode string // raw HostConfig.NetworkMode — e.g. "container:abc123"
+	ImageID     string // "sha256:..." digest of the image the container is running on; used by F-45 image-drift detection
 }
 
 // EventMsg is the narrowed event shape autostart cares about. Tests
 // emit these via a channel; in production dockerAdapter translates
 // docker SDK events.Message into this form.
+//
+// Two actions are observed today:
+//   - "start"   — F-43 sibling autostart + F-45 create-then-start on target start
+//   - "destroy" — F-45 SA-gone respawn (issue #8): if the destroyed
+//                 container was the configured managed service-anchor
+//                 and the target is still running, recreate the SA.
+//                 "destroy" rather than "die" because we want the SA
+//                 to actually be removed from the daemon before we
+//                 spawn its replacement, and because reacting to "die"
+//                 would fight docker's own restart-policy on crashes.
+//
+// All other actions are dropped silently in consume.
 type EventMsg struct {
-	Action  string // "start" — autostart ignores everything else
+	Action  string
 	ActorID string
 	ActorName string
 }
@@ -83,7 +96,8 @@ type CreateSpec struct {
 // once at startup — used to fill F-45 defaults (image, IP on shared
 // network) when the operator hasn't supplied them.
 type SelfInfo struct {
-	Image        string            // anchord's own image, used as default for ManagedSA.Image
+	Image        string            // anchord's own image NAME (e.g. "ghcr.io/.../anchord:v1.0.2"), used as default for ManagedSA.Image
+	ImageID      string            // "sha256:..." digest the parent is running on; used to detect F-45 image-drift on backfill
 	IPsByNetwork map[string]string // network name -> IP (used to default GatewayIP)
 }
 
@@ -228,14 +242,16 @@ func (w *Watcher) consume(ctx context.Context, msgs <-chan EventMsg, errs <-chan
 			if !ok {
 				return fmt.Errorf("event message channel closed")
 			}
-			if msg.Action != "start" {
-				continue
+			switch msg.Action {
+			case "start":
+				w.handleTargetStart(ctx, ContainerInfo{
+					ID:    msg.ActorID,
+					Names: []string{msg.ActorName},
+					State: "running",
+				})
+			case "destroy":
+				w.handleSAGone(ctx, msg.ActorName)
 			}
-			w.handleTargetStart(ctx, ContainerInfo{
-				ID:    msg.ActorID,
-				Names: []string{msg.ActorName},
-				State: "running",
-			})
 		}
 	}
 }
@@ -246,11 +262,34 @@ func (w *Watcher) consume(ctx context.Context, msgs <-chan EventMsg, errs <-chan
 // kicks start on any Created-state sibling whose NetworkMode resolves
 // to one of them. With an active F-45 recipe also runs the
 // create-then-start path against the configured target.
+//
+// Backfill is also where the F-45 image-drift check fires (issue #8
+// follow-up): if the parent was upgraded to a new image since the
+// managed SA was created, the SA is forcibly recreated against the
+// new image. The check only runs once per process lifetime (here)
+// rather than on every event, so it can't fight an operator who
+// pinned a specific SA image at runtime, and so a noisy event-source
+// can't trigger churning recreates.
 func (w *Watcher) backfill(ctx context.Context) {
 	all, err := w.ops.List(ctx)
 	if err != nil {
 		slog.Warn("autostart backfill list failed", "err", err)
 		return
+	}
+	// F-45 image-drift pre-pass. Skip when the recipe is inactive or
+	// when the operator pinned ManagedSA.Image explicitly — in both
+	// cases the cascade-on-parent-upgrade semantics don't apply.
+	var self SelfInfo
+	selfFetched := false
+	if w.recipe.Active() && w.recipe.Image == "" {
+		s, err := w.ops.InspectSelf(ctx)
+		if err == nil {
+			self = s
+			selfFetched = true
+		} else {
+			slog.Warn("F-45 backfill self-inspect failed; skipping image-drift check",
+				"err", err)
+		}
 	}
 	for _, t := range all {
 		if t.State != "running" {
@@ -259,8 +298,84 @@ func (w *Watcher) backfill(ctx context.Context) {
 		for _, sib := range matchSiblings(all, t) {
 			w.start(ctx, sib, t, "backfill")
 		}
+		if selfFetched {
+			// May remove the SA from `all` so the maybeManage below
+			// then takes the create-fresh path with the new image.
+			all = w.maybeRecreateStaleImageSA(ctx, all, t, self)
+		}
 		w.maybeManage(ctx, all, t, "backfill")
 	}
+}
+
+// maybeRecreateStaleImageSA force-removes the managed SA when it's
+// running on an image digest different from the parent's. The intent
+// is the cluster-rolling-deploy workflow: the operator pushes a new
+// anchord image, runs `docker compose pull && up`, parents restart
+// on the new digest, and any standalone (non-compose-managed) SAs
+// catch up automatically on the parent's first backfill pass.
+//
+// Returns the input `all` with the removed SA dropped so a follow-up
+// maybeManage call on the same list re-takes the create-from-scratch
+// path. Failures are logged at warn-level and the SA is left in place
+// — same robustness contract as the other F-45 mutators.
+//
+// Caller-side gating (recipe.Active(), recipe.Image=="") happens in
+// backfill before self is even fetched, so this helper assumes a
+// populated `self`.
+func (w *Watcher) maybeRecreateStaleImageSA(ctx context.Context, all []ContainerInfo, target ContainerInfo, self SelfInfo) []ContainerInfo {
+	if !targetMatchesRecipe(target, w.recipe.Target) {
+		return all
+	}
+	idx := -1
+	for i := range all {
+		if hasName(all[i], w.recipe.Name) {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return all
+	}
+	sa := all[idx]
+	if !strings.EqualFold(sa.State, "running") {
+		return all
+	}
+	if !saUsesStaleImage(sa, self, w.recipe) {
+		return all
+	}
+	slog.Info("managed service-anchor running on stale image; recreating",
+		"name", w.recipe.Name,
+		"target", w.recipe.Target,
+		"sa_image_id", sa.ImageID,
+		"parent_image_id", self.ImageID,
+		"reason", "image_drift")
+	if err := w.ops.Remove(ctx, sa.ID); err != nil {
+		slog.Warn("failed to remove stale-image managed SA; leaving in place",
+			"name", w.recipe.Name, "err", err)
+		return all
+	}
+	return append(all[:idx], all[idx+1:]...)
+}
+
+// saUsesStaleImage reports whether the managed SA is running on a
+// different image digest than the parent (self). Returns false if:
+//   - the recipe pins an image explicitly (operator override wins —
+//     we don't auto-recreate to "match" the parent in that case)
+//   - either side's ImageID is empty (defensive — old fakeOps tests
+//     and pre-v1.0.2 callers that didn't populate the field stay
+//     no-op rather than spuriously recreating)
+//
+// The comparison is by digest, not by tag string, so tag-floats like
+// `:main` / `:latest` (the typical rolling-deploy pattern) trigger
+// correctly: same string, different sha256.
+func saUsesStaleImage(sa ContainerInfo, self SelfInfo, recipe config.ManagedSARecipe) bool {
+	if recipe.Image != "" {
+		return false
+	}
+	if sa.ImageID == "" || self.ImageID == "" {
+		return false
+	}
+	return sa.ImageID != self.ImageID
 }
 
 // handleTargetStart is the per-event entry: a target just started,
@@ -276,6 +391,62 @@ func (w *Watcher) handleTargetStart(ctx context.Context, target ContainerInfo) {
 		w.start(ctx, sib, target, "event")
 	}
 	w.maybeManage(ctx, all, target, "event")
+}
+
+// handleSAGone reacts to a container "destroy" event by checking
+// whether the gone container was the F-45 managed service-anchor.
+// If so, and the configured target is still running, walk the same
+// create-then-start path the startup backfill uses. All other
+// destroy events are early-returned.
+//
+// Closes issue #8: previously the watcher only listened to "start"
+// events. An SA removed at runtime (`docker rm -f`, operator upgrade
+// by recreate, accidental prune, OOM-killer) was never respawned —
+// the wrapped service kept anchord's DNAT in place but had no
+// service-anchor in its netns, so the default-route enforcement F-45
+// guarantees was silently gone until the parent network-anchor
+// itself restarted. Production case: 2026-05-23 binary rollout to
+// ldap-service-anchor / nextcloud-aio-talk-anchor.
+//
+// "destroy" rather than "die" because we want the SA to actually be
+// removed from the daemon before we spawn its replacement (a "die"
+// event still has the container in the list, in exited/dead state,
+// and maybeManage's default branch would issue a no-op Start against
+// it). It also lets docker's own restart-policy handle plain crashes
+// without our intervention.
+func (w *Watcher) handleSAGone(ctx context.Context, saName string) {
+	if !w.recipe.Active() {
+		return
+	}
+	// Docker emits the bare container name (no leading slash) in
+	// Actor.Attributes["name"]; recipe.Name is also stored bare. The
+	// TrimPrefix on both sides is defensive against future SDK quirks.
+	if strings.TrimPrefix(saName, "/") != strings.TrimPrefix(w.recipe.Name, "/") {
+		return
+	}
+	all, err := w.ops.List(ctx)
+	if err != nil {
+		slog.Warn("autostart sa-gone list failed", "name", saName, "err", err)
+		return
+	}
+	var target *ContainerInfo
+	for i := range all {
+		if targetMatchesRecipe(all[i], w.recipe.Target) {
+			target = &all[i]
+			break
+		}
+	}
+	if target == nil || !strings.EqualFold(target.State, "running") {
+		// Target is also gone or not running — the operator is tearing
+		// the stack down, not just the SA. Respawning would fight a
+		// shutdown we don't own.
+		slog.Debug("managed service-anchor destroyed but target is not running; skipping respawn",
+			"name", w.recipe.Name, "target", w.recipe.Target)
+		return
+	}
+	slog.Info("managed service-anchor gone; respawning",
+		"name", w.recipe.Name, "target", w.recipe.Target, "reason", "absent")
+	w.maybeManage(ctx, all, *target, "event/sa-gone")
 }
 
 // maybeManage is the F-45 create-then-start dispatcher.
@@ -600,6 +771,7 @@ func (a dockerAdapter) List(ctx context.Context) ([]ContainerInfo, error) {
 			Names:       c.Names,
 			State:       c.State,
 			NetworkMode: c.HostConfig.NetworkMode,
+			ImageID:     c.ImageID,
 		})
 	}
 	return out, nil
@@ -640,6 +812,7 @@ func (a dockerAdapter) InspectSelf(ctx context.Context) (SelfInfo, error) {
 	}
 	out := SelfInfo{
 		Image:        insp.Config.Image,
+		ImageID:      insp.Image, // already a "sha256:..." digest from the SDK
 		IPsByNetwork: map[string]string{},
 	}
 	if insp.NetworkSettings != nil {
@@ -666,7 +839,12 @@ func selfHostname() string {
 func (a dockerAdapter) Events(ctx context.Context) (<-chan EventMsg, <-chan error) {
 	f := filters.NewArgs()
 	f.Add("type", "container")
+	// Multiple Add() calls on the same key OR them together at the
+	// daemon. "start" is F-43 + F-45 happy path; "destroy" is the
+	// F-45 SA-gone respawn trigger (issue #8). Other actions are
+	// dropped by the consume switch.
 	f.Add("event", "start")
+	f.Add("event", "destroy")
 	rawMsgs, rawErrs := a.cli.Events(ctx, events.ListOptions{Filters: f})
 	msgs := make(chan EventMsg, 4)
 	errs := make(chan error, 1)
