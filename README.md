@@ -467,8 +467,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-20T13:31:27Z
-- **Code hash:** `sha256:5c3f9bad3f33eb4df324026d8c62a8c2667390ebe3ea02b6f317c17373643f3b`
+- **Last verified:** 2026-05-23T12:17:40Z
+- **Code hash:** `sha256:ff61d6d5841925175fab37db9bc19b5e5e06da4406f82a3f3f15f4c5f6c87d26`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -476,12 +476,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 269 | 0 | 0 | 269 |
+| Go unit tests | 280 | 0 | 0 | 280 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **343** | **0** | **0** | **343** |
+| **All tests** | **354** | **0** | **0** | **354** |
 
 <details>
-<summary>Go unit tests &mdash; 269/269 passed</summary>
+<summary>Go unit tests &mdash; 280/280 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -498,6 +498,9 @@ release-readiness signal.
 | `cmd/anchord` | `TestSelectMode/subcommand_wins_over_env` | ✓ |
 | `cmd/anchord` | `TestSelectMode/unknown_env_errors` | ✓ |
 | `cmd/anchord` | `TestSelectMode/unknown_subcommand_errors` | ✓ |
+| `internal/autostart` | `TestBackfill_F45_NoImageCheckWhenRecipePinsImage` | ✓ |
+| `internal/autostart` | `TestBackfill_F45_NoRecreateWhenImagesMatch` | ✓ |
+| `internal/autostart` | `TestBackfill_F45_RecreatesSAOnImageDrift` | ✓ |
 | `internal/autostart` | `TestBackfill_NoStrandedSiblings_NoOp` | ✓ |
 | `internal/autostart` | `TestBackfill_StartsStrandedCreatedSibling` | ✓ |
 | `internal/autostart` | `TestMatchSiblings_EmptyTargetReturnsNil` | ✓ |
@@ -515,12 +518,16 @@ release-readiness signal.
 | `internal/autostart` | `TestRun_F45_CreatesAndStartsWhenSAAbsent` | ✓ |
 | `internal/autostart` | `TestRun_F45_ExplicitGatewayIPWinsOverSelfIP` | ✓ |
 | `internal/autostart` | `TestRun_F45_ExtraEnvAndDeterministicOrder` | ✓ |
+| `internal/autostart` | `TestRun_F45_IgnoresDestroyOfUnrelatedContainer` | ✓ |
 | `internal/autostart` | `TestRun_F45_IgnoresUnrelatedTargets` | ✓ |
+| `internal/autostart` | `TestRun_F45_ImageDriftCheckSkippedOnEvent` | ✓ |
 | `internal/autostart` | `TestRun_F45_InactiveRecipeFallsBackToF43` | ✓ |
 | `internal/autostart` | `TestRun_F45_NoOpWhenManagedSAAlreadyRunning` | ✓ |
 | `internal/autostart` | `TestRun_F45_NoRecreateWhenSANetnsCurrent` | ✓ |
+| `internal/autostart` | `TestRun_F45_NoRespawnIfTargetAlsoGone` | ✓ |
 | `internal/autostart` | `TestRun_F45_NoSharedNetYetSkipsCreate` | ✓ |
 | `internal/autostart` | `TestRun_F45_OperatorLabelsReachSpec` | ✓ |
+| `internal/autostart` | `TestRun_F45_RecreatesSAOnDestroy` | ✓ |
 | `internal/autostart` | `TestRun_F45_RecreatesSAOnStaleNetns` | ✓ |
 | `internal/autostart` | `TestRun_F45_SharedNetworkLookupIsLazy` | ✓ |
 | `internal/autostart` | `TestRun_F45_SkipsCreateWhenSAInCreatedState` | ✓ |
@@ -646,6 +653,9 @@ release-readiness signal.
 | `internal/discovery` | `TestBuildSnapshotFilter_EmptyDiscriminatorKeepsExposeGuard` | ✓ |
 | `internal/discovery` | `TestBuildSnapshotFilter_LabelSelectorAnd` | ✓ |
 | `internal/discovery` | `TestBuildSnapshotFilter_LegacyProject` | ✓ |
+| `internal/discovery` | `TestConsumeEventStream_CtxCancelStopsLoop` | ✓ |
+| `internal/discovery` | `TestConsumeEventStream_ErrSignalRequestsRetry` | ✓ |
+| `internal/discovery` | `TestConsumeEventStream_StaysOnSameStreamAcrossMessages` | ✓ |
 | `internal/discovery` | `TestParseIP` | ✓ |
 | `internal/discovery` | `TestPickIPs_NilNetworkSettings` | ✓ |
 | `internal/discovery` | `TestPickIPs_NoSharedFallsBackToFirst` | ✓ |
@@ -657,6 +667,7 @@ release-readiness signal.
 | `internal/discovery` | `TestResolveSharedNetIPs_FollowsContainerNetworkMode` | ✓ |
 | `internal/discovery` | `TestResolveSharedNetIPs_WrapTargetMissing` | ✓ |
 | `internal/discovery` | `TestRuleLess` | ✓ |
+| `internal/discovery` | `TestRunEventLoop_OnlyReopensAfterStreamEnds` | ✓ |
 | `internal/discovery` | `TestStateEqual` | ✓ |
 | `internal/discovery` | `TestTrimName` | ✓ |
 | `internal/extiface` | `TestResolve_APIError_RetriesThenFails` | ✓ |
@@ -807,12 +818,12 @@ release-readiness signal.
 | `both` | S-6 logs show graceful shutdown | ✓ |
 | `both` | S-6 nat teardown clean (no warnings) | ✓ |
 | `none` | anchord container running | ✓ |
-| `none` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `none` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `none` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `none` | nftables anchord_v4 table installed | ✓ |
 | `none` | nftables anchord_v6 table installed | ✓ |
-| `none` | eth0 keeps Docker-bootstrapped IPv4 | ✓ |
-| `none` | eth0 keeps Docker-bootstrapped IPv6 | ✓ |
+| `none` | eth1 keeps Docker-bootstrapped IPv4 | ✓ |
+| `none` | eth1 keeps Docker-bootstrapped IPv6 | ✓ |
 | `none` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `none` | S-2 (v6) source IP preserved through DNAT | ✓ |
 | `none` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
