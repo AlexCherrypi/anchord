@@ -407,6 +407,10 @@ func TestParseIP(t *testing.T) {
 	}
 }
 
+// testBackoff is short enough that ErrSignalRequestsRetry can wait the
+// full backoff and assert retry=true deterministically.
+const testBackoff = 1 * time.Millisecond
+
 // Regression for the docker-socket-proxy connection leak: a single
 // open stream must serve many messages — consumeEventStream must not
 // return between messages, only on stream-end or ctx cancellation.
@@ -431,7 +435,7 @@ func TestConsumeEventStream_StaysOnSameStreamAcrossMessages(t *testing.T) {
 
 	retry, err := consumeEventStream(ctx, msgs, errs, func() {
 		calls.Add(1)
-	})
+	}, testBackoff)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -450,7 +454,7 @@ func TestConsumeEventStream_CtxCancelStopsLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancelled
 
-	retry, err := consumeEventStream(ctx, msgs, errs, func() {})
+	retry, err := consumeEventStream(ctx, msgs, errs, func() {}, testBackoff)
 	if retry {
 		t.Error("retry should be false when ctx cancelled — caller should not reopen")
 	}
@@ -462,21 +466,103 @@ func TestConsumeEventStream_CtxCancelStopsLoop(t *testing.T) {
 func TestConsumeEventStream_ErrSignalRequestsRetry(t *testing.T) {
 	msgs := make(chan events.Message)
 	errs := make(chan error, 1)
-
-	// Use a context with a small timeout so the post-error backoff
-	// returns quickly without holding the test up for 2 s.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errs <- errors.New("stream interrupted")
 
 	retry, err := consumeEventStream(ctx, msgs, errs, func() {
 		t.Error("onMessage must not be called on errs path")
-	})
-	// Backoff hit ctx-cancel rather than completing — that's fine, the
-	// real-world caller already received the "retry after backoff"
-	// instruction and will simply observe ctx.Err() next.
-	if err == nil && !retry {
-		t.Error("on err with no ctx-cancel mid-backoff we expect retry=true")
+	}, testBackoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	if !retry {
+		t.Error("retry should be true after errs signal so caller reopens")
+	}
+}
+
+// Regression for the docker-socket-proxy connection leak at the
+// reconnect-loop layer: source must be called once per *real*
+// disconnect, NOT once per event. The pre-fix shape opened a fresh
+// long-poll HTTP request on every message and leaked the previous
+// one's goroutine. This test would have failed loudly before commit
+// 47b445d (a 2nd stream would have been requested after the first
+// message).
+func TestRunEventLoop_OnlyReopensAfterStreamEnds(t *testing.T) {
+	type stream struct {
+		msgs chan events.Message
+		errs chan error
+	}
+	streams := make(chan *stream, 4)
+
+	source := func(ctx context.Context) (<-chan events.Message, <-chan error) {
+		s := &stream{
+			msgs: make(chan events.Message, 16),
+			errs: make(chan error, 1),
+		}
+		streams <- s
+		return s.msgs, s.errs
+	}
+
+	var eventCalls atomic.Int32
+	consume := func(ctx context.Context, msgs <-chan events.Message, errs <-chan error) (bool, error) {
+		for {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case _, ok := <-msgs:
+				if !ok {
+					return true, nil // signal reopen on stream end
+				}
+				eventCalls.Add(1)
+			}
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runEventLoop(ctx, source, consume) }()
+
+	// First stream is opened eagerly.
+	s1 := <-streams
+
+	// Pump 5 events through the SAME stream.
+	for i := 0; i < 5; i++ {
+		s1.msgs <- events.Message{Action: "start", Actor: events.Actor{ID: "abcdef0123456789"}}
+	}
+	waitFor(t, 2*time.Second, func() bool { return eventCalls.Load() == 5 })
+
+	// Central assertion: no new stream was requested while events were flowing.
+	select {
+	case <-streams:
+		t.Fatal("source was called a second time mid-stream — leak fix regressed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Close the stream → source MUST be called a second time.
+	close(s1.msgs)
+	select {
+	case <-streams:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("source was not called again after stream close — caller failed to reopen")
+	}
+
+	cancel()
+	<-done
+}
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for condition after %s", timeout)
 }

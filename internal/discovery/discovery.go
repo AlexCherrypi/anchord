@@ -166,22 +166,37 @@ func (d *Discoverer) pollLoop(ctx context.Context) {
 	}
 }
 
+// streamErrBackoff is the pause after the docker event stream emits
+// an error before we reopen. Production value; tests pass shorter
+// durations directly into consumeEventStream.
+const streamErrBackoff = 2 * time.Second
+
 func (d *Discoverer) eventLoop(ctx context.Context) error {
 	f := buildEventFilter(d.discriminator)
+	source := func(ctx context.Context) (<-chan events.Message, <-chan error) {
+		return d.cli.Events(ctx, events.ListOptions{Filters: f})
+	}
+	return runEventLoop(ctx, source, d.consumeEvents)
+}
 
+// runEventLoop is the reconnect-loop: open a stream via source, drain
+// it via consume until ctx cancels or the stream ends, reopen only
+// then. Extracted from eventLoop so tests can verify the central
+// invariant — source is called once per real disconnect, NOT once per
+// event. The pre-fix shape placed source() inside the inner select
+// and re-called it on every message, opening a fresh long-poll HTTP
+// request to docker(-proxy) per event while the prior request's
+// goroutine stayed parked on the old (still-valid-ctx) connection.
+// On busy event sources (Frigate watchdog cycling ffmpeg subprocesses)
+// the leaked sockets exhaust the kernel's tcp_mem.
+func runEventLoop(
+	ctx context.Context,
+	source func(context.Context) (<-chan events.Message, <-chan error),
+	consume func(context.Context, <-chan events.Message, <-chan error) (bool, error),
+) error {
 	for {
-		msgs, errs := d.cli.Events(ctx, events.ListOptions{Filters: f})
-		// consumeEvents stays on the SAME (msgs, errs) pair until the
-		// stream ends (errs/closed) or ctx is cancelled. Earlier
-		// versions exited the inner select after every single message
-		// and re-called cli.Events, which opens a fresh long-poll HTTP
-		// request to the docker daemon each time but never closes the
-		// previous one — the prior goroutine stays parked on the old
-		// connection. On busy event sources (e.g. a Frigate watchdog
-		// restarting ffmpeg subprocesses) anchord then accumulates
-		// hundreds of ESTAB sockets to docker(-proxy) until the kernel
-		// hits its tcp_mem ceiling.
-		retry, err := d.consumeEvents(ctx, msgs, errs)
+		msgs, errs := source(ctx)
+		retry, err := consume(ctx, msgs, errs)
 		if err != nil {
 			return err
 		}
@@ -202,20 +217,30 @@ func (d *Discoverer) consumeEvents(ctx context.Context, msgs <-chan events.Messa
 		if err := d.snapshot(ctx); err != nil {
 			slog.Warn("event-driven snapshot failed", "err", err)
 		}
-	})
+	}, streamErrBackoff)
 }
 
 // consumeEventStream is the pure consume-loop. Behaviour contract:
 //   - ctx cancelled    → returns (false, ctx.Err())
-//   - errs delivers    → returns (true, nil) after a 2s backoff
+//   - errs delivers    → returns (true, nil) after errBackoff
 //   - msgs is closed   → returns (true, nil) immediately
 //   - msgs message     → onMessage() invoked, loop continues on SAME stream
 //
 // The invariant: while messages keep flowing, the function does NOT
 // return — callers must not re-enter to reopen a fresh stream per
 // message. That pattern leaked the long-poll HTTP request to
-// docker(-proxy) on every event (F-46 regression).
-func consumeEventStream(ctx context.Context, msgs <-chan events.Message, errs <-chan error, onMessage func()) (retry bool, err error) {
+// docker(-proxy) on every event (see commit 47b445d).
+//
+// errBackoff is a parameter, not a constant, so tests can pass a tiny
+// duration and assert retry semantics deterministically without
+// waiting two real seconds.
+func consumeEventStream(
+	ctx context.Context,
+	msgs <-chan events.Message,
+	errs <-chan error,
+	onMessage func(),
+	errBackoff time.Duration,
+) (retry bool, err error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -228,7 +253,7 @@ func consumeEventStream(ctx context.Context, msgs <-chan events.Message, errs <-
 			select {
 			case <-ctx.Done():
 				return false, ctx.Err()
-			case <-time.After(2 * time.Second):
+			case <-time.After(errBackoff):
 			}
 			return true, nil
 		case msg, ok := <-msgs:
