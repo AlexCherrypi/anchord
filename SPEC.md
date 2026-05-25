@@ -65,6 +65,22 @@ several containers", that's a bug.
 - **F-10** Both TCP and UDP are supported.
 - **F-11** IPv6 exposure is automatic by default (mirrors v4 rules onto the
   AAAA address). Per-container opt-out via `anchord.expose.v6: off`.
+- **F-47** Hairpin DNAT: a sibling container that connects to the
+  project's external IP on a labelled port reaches the same backend
+  as an external client does. Implemented by scoping prerouting DNAT
+  to `daddr type local` (matches any address owned by the anchor,
+  regardless of ingress interface) and adding a postrouting SNAT on
+  hairpinned packets so the backend's reply routes back via the
+  anchor instead of L2-bypassing it. F-9 only applies to LAN
+  ingress — hairpin replies necessarily lose the original sibling's
+  source IP, which is acceptable because the "client" is in the same
+  project and spam-scoring / audit / allowlist concerns don't apply.
+  v4 always uses the fib-based guard; v6 uses it when the kernel
+  loads `nft_fib_ipv6` (probed at Setup), else falls back to the
+  legacy `iifname == extIface` predicate that scopes DNAT to LAN
+  ingress only. All major production distros (TrueNAS SCALE, Debian,
+  Ubuntu, Alpine on a real kernel) ship `nft_fib_ipv6`; the fallback
+  exists for stripped-down dev/CI kernels (WSL2).
 
 ### 2.3 Outbound traffic (egress)
 

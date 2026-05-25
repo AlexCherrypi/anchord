@@ -14,6 +14,7 @@
 package nat
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
+	"github.com/google/nftables/expr"
 )
 
 const (
@@ -493,6 +495,125 @@ func TestIntegrationConcurrentSetMapDifferentMaps(t *testing.T) {
 	}
 	if got := readMap(t, V4, "dnat_udp"); !targetsEqual(got, finalUDP, V4) {
 		t.Errorf("final udp got %v want %v", got, finalUDP)
+	}
+}
+
+// TestIntegrationHairpinRulesInstalled is the F-47 / issue #11
+// regression test: after Setup(), prerouting rules must guard on
+// `fib daddr type local` (not `iifname == extIface`) and postrouting
+// must carry the hairpin SNAT rule ahead of the egress masquerade.
+//
+// v4 always uses fib. v6 uses fib when the running kernel supports
+// `nft_fib_ipv6` (probed at Setup); on stripped-down kernels
+// (e.g. WSL2 CI) v6 falls back to the legacy iifname predicate.
+//
+// Without this fix, packets from a sibling on a bridge that target
+// the anchor's macvlan IP either don't get DNAT'd (old iifname-only
+// predicate) or get DNAT'd but the reply skips the anchor (no
+// hairpin SNAT), and the sibling drops the unexpected 4-tuple.
+func TestIntegrationHairpinRulesInstalled(t *testing.T) {
+	requireNetAdmin(t)
+	m := newManager(t)
+	t.Logf("v6 fib support probed: %v", m.v6FibSupported)
+
+	c := &nftables.Conn{}
+	for _, family := range []Family{V4, V6} {
+		fam := family
+		t.Run(fam.String(), func(t *testing.T) {
+			tableName := tableV4
+			tableFam := nftables.TableFamilyIPv4
+			if fam == V6 {
+				tableName = tableV6
+				tableFam = nftables.TableFamilyIPv6
+			}
+			tbl := &nftables.Table{Name: tableName, Family: tableFam}
+
+			// Prerouting: 4 rules (xlat-jump + dnat-lookup per proto).
+			// v4 must NEVER start with Meta IIFNAME (F-47 regression
+			// would re-introduce the old iifname predicate). v6 must
+			// match the kernel-probe-decided shape: fib when supported,
+			// iifname otherwise.
+			//
+			// Why not assert *expr.Fib directly: google/nftables v0.2.0
+			// doesn't unmarshal the "fib" expression (its parser-switch
+			// has no "fib" case), so c.GetRules silently drops the Fib
+			// expression. The Cmp that follows it survives, so a fib
+			// rule reads back as
+			// `Cmp(RTN_LOCAL) + Meta L4PROTO + Cmp(proto) + …`. We
+			// detect the layout by the *absence* of Meta IIFNAME at
+			// slot 0 (the iifname-fallback shape has it).
+			expectFib := fam == V4 || m.v6FibSupported
+			pre, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "prerouting"})
+			if err != nil {
+				t.Fatalf("GetRules(prerouting): %v", err)
+			}
+			if len(pre) != 4 {
+				t.Fatalf("prerouting rule count = %d, want 4", len(pre))
+			}
+			for i, r := range pre {
+				if len(r.Exprs) < 2 {
+					t.Errorf("prerouting rule %d: too few exprs (%d)", i, len(r.Exprs))
+					continue
+				}
+				if expectFib {
+					if mt, ok := r.Exprs[0].(*expr.Meta); ok && mt.Key == expr.MetaKeyIIFNAME {
+						t.Errorf("%s prerouting rule %d: first expr is Meta{IIFNAME} — F-47 regression, expected fib-based guard", fam, i)
+					}
+				} else {
+					mt, ok := r.Exprs[0].(*expr.Meta)
+					if !ok || mt.Key != expr.MetaKeyIIFNAME {
+						t.Errorf("%s prerouting rule %d (iifname fallback expected): first expr = %T, want Meta{IIFNAME}", fam, i, r.Exprs[0])
+					}
+				}
+			}
+
+			// Postrouting: 2 rules — hairpin SNAT first, then egress
+			// masquerade. Hairpin rule must start with a Meta IIFNAME
+			// load (the `iifname != extIface` predicate); egress rule
+			// must start with a Meta OIFNAME load.
+			post, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "postrouting"})
+			if err != nil {
+				t.Fatalf("GetRules(postrouting): %v", err)
+			}
+			if len(post) != 2 {
+				t.Fatalf("postrouting rule count = %d, want 2 (hairpin SNAT + egress masquerade)", len(post))
+			}
+			hairpin := post[0]
+			if len(hairpin.Exprs) == 0 {
+				t.Fatalf("postrouting rule 0 (hairpin) has no exprs")
+			}
+			if m, ok := hairpin.Exprs[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
+				t.Errorf("postrouting rule 0: first expr = %T, want Meta{IIFNAME}", hairpin.Exprs[0])
+			}
+			// Hairpin must end with Masq verdict, and the iifname
+			// compare must be Neq (NOT equal extIface) — Eq would
+			// also catch LAN-ingress and break F-9 source preservation.
+			var sawMasq, sawIifNeq bool
+			for _, e := range hairpin.Exprs {
+				if _, ok := e.(*expr.Masq); ok {
+					sawMasq = true
+				}
+				if cmp, ok := e.(*expr.Cmp); ok && cmp.Op == expr.CmpOpNeq {
+					if bytes.Equal(cmp.Data, ifaceBytes(testIface)) {
+						sawIifNeq = true
+					}
+				}
+			}
+			if !sawMasq {
+				t.Error("hairpin rule lacks Masq verdict")
+			}
+			if !sawIifNeq {
+				t.Error("hairpin rule lacks `iifname != extIface` Neq compare — F-9 regression risk")
+			}
+
+			egress := post[1]
+			if len(egress.Exprs) == 0 {
+				t.Fatalf("postrouting rule 1 (egress) has no exprs")
+			}
+			if m, ok := egress.Exprs[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyOIFNAME {
+				t.Errorf("postrouting rule 1: first expr = %T, want Meta{OIFNAME}", egress.Exprs[0])
+			}
+		})
 	}
 }
 

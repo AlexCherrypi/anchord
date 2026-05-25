@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
+	"github.com/google/nftables/expr"
+	"golang.org/x/sys/unix"
 )
 
 func TestFamilyString(t *testing.T) {
@@ -62,6 +65,73 @@ func TestAddressFamily(t *testing.T) {
 	if got, want := addressFamily(V6), uint32(nftables.TableFamilyIPv6); got != want {
 		t.Errorf("V6: got %d want %d", got, want)
 	}
+}
+
+// TestPreroutingGuardExprs pins the F-47 prerouting guard shape.
+// v4 must always use `fib daddr type local` (Fib + Cmp == RTN_LOCAL).
+// v6 uses fib when the kernel supports it (probeV6FibSupported in
+// Setup), else falls back to `iifname == extIface`. A regression
+// that re-introduces iifname for v4 — or drops fib for v6 even when
+// the kernel supports it — surfaces here as a mismatched list.
+func TestPreroutingGuardExprs(t *testing.T) {
+	assertFibLocal := func(t *testing.T, got []expr.Any) {
+		t.Helper()
+		if len(got) != 2 {
+			t.Fatalf("expected 2 exprs, got %d", len(got))
+		}
+		fib, ok := got[0].(*expr.Fib)
+		if !ok {
+			t.Fatalf("first expr is %T, want *expr.Fib", got[0])
+		}
+		if !fib.FlagDADDR {
+			t.Error("Fib.FlagDADDR not set")
+		}
+		if !fib.ResultADDRTYPE {
+			t.Error("Fib.ResultADDRTYPE not set")
+		}
+		if fib.Register != 1 {
+			t.Errorf("Fib.Register = %d, want 1", fib.Register)
+		}
+		cmp, ok := got[1].(*expr.Cmp)
+		if !ok {
+			t.Fatalf("second expr is %T, want *expr.Cmp", got[1])
+		}
+		if cmp.Op != expr.CmpOpEq {
+			t.Errorf("Cmp.Op = %v, want CmpOpEq", cmp.Op)
+		}
+		wantData := binaryutil.NativeEndian.PutUint32(uint32(unix.RTN_LOCAL))
+		if !bytes.Equal(cmp.Data, wantData) {
+			t.Errorf("Cmp.Data = % x, want % x (RTN_LOCAL)", cmp.Data, wantData)
+		}
+	}
+	assertIifname := func(t *testing.T, got []expr.Any) {
+		t.Helper()
+		if len(got) != 2 {
+			t.Fatalf("expected 2 exprs, got %d", len(got))
+		}
+		m, ok := got[0].(*expr.Meta)
+		if !ok || m.Key != expr.MetaKeyIIFNAME {
+			t.Fatalf("first expr = %T, want Meta{IIFNAME}", got[0])
+		}
+		cmp, ok := got[1].(*expr.Cmp)
+		if !ok || cmp.Op != expr.CmpOpEq {
+			t.Fatalf("second expr unexpected: %T", got[1])
+		}
+		if !bytes.Equal(cmp.Data, ifaceBytes("eth0")) {
+			t.Errorf("Cmp.Data = % x, want ifaceBytes(eth0)", cmp.Data)
+		}
+	}
+
+	t.Run("v4 always uses fib (kernel support irrelevant)", func(t *testing.T) {
+		assertFibLocal(t, preroutingGuardExprs("eth0", V4, false))
+		assertFibLocal(t, preroutingGuardExprs("eth0", V4, true))
+	})
+	t.Run("v6 with fib support uses fib", func(t *testing.T) {
+		assertFibLocal(t, preroutingGuardExprs("eth0", V6, true))
+	})
+	t.Run("v6 without fib support falls back to iifname", func(t *testing.T) {
+		assertIifname(t, preroutingGuardExprs("eth0", V6, false))
+	})
 }
 
 // TestMapForFamProto verifies the family/proto -> set lookup table

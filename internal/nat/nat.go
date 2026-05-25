@@ -15,25 +15,29 @@
 // with-RegProtoMin pattern (it expects port data co-located with
 // address data, not loaded separately). So translating entries are
 // implemented as explicit per-entry rules in a sub-chain that the
-// main prerouting jumps to *before* the map-lookup rule:
+// main prerouting jumps to *before* the map-lookup rule.
 //
-//	chain prerouting {
-//	  iifname "eth0" meta l4proto tcp jump dnat_xlat_tcp
-//	  iifname "eth0" meta l4proto tcp dnat ip to tcp dport map @dnat_tcp
-//	  iifname "eth0" meta l4proto udp jump dnat_xlat_udp
-//	  iifname "eth0" meta l4proto udp dnat ip to udp dport map @dnat_udp
-//	}
-//	chain dnat_xlat_tcp {
-//	  tcp dport 636 dnat to 172.31.80.9:6636
-//	  // … one rule per translating entry, rebuilt by each SetMap call
-//	}
+// F-47 hairpin DNAT (issue #11): prerouting matches on
+// `fib daddr type local` instead of `iifname == extIface`. This
+// catches packets destined for any of the anchor's own addresses
+// regardless of ingress interface, which is what the LAN-ingress
+// path (dst = macvlan IP) AND the sibling-on-a-bridge hairpin path
+// both need. Traffic the anchor is merely forwarding to an external
+// destination has a non-local dst and falls through. The cost of
+// hairpin is asymmetric routing — without intervention the backend
+// would reply directly to the sibling on the shared bridge, bypassing
+// the anchor and dropping the connection. Postrouting therefore
+// SNATs DNAT'd traffic that did NOT enter via the macvlan, so the
+// backend's reply goes back via the anchor (where conntrack reverses
+// both translations). LAN-ingress is excluded from this SNAT — F-9
+// (client source IP preservation) remains intact for external clients.
 //
-// Non-translating entries (the common case) live in the address map
-// and use the fast map-lookup path. Translating entries fall through
-// the sub-chain first; an entry with a matching dport short-circuits
-// with a literal DNAT. SetMap flushes both the address map and the
-// sub-chain in one netlink batch so the data plane never sees a
-// half-applied state.
+// v4 always uses the fib-based guard. v6 uses it when the running
+// kernel loads `nft_fib_ipv6` — probed once at Setup. Stripped-down
+// kernels (WSL2 in CI/dev) reject the expression at commit time;
+// the probe falls back to the legacy `iifname == extIface` predicate
+// for v6 in that case. v6 hairpin is then lost, but v4 hairpin and
+// all v6 LAN-ingress DNAT still work.
 //
 // Layout (v4 example, with ANCHORD_EXT_IFACE="eth0"):
 //
@@ -44,13 +48,14 @@
 //	  chain dnat_xlat_udp { … }
 //	  chain prerouting {
 //	    type nat hook prerouting priority dstnat;
-//	    iifname "eth0" meta l4proto tcp jump dnat_xlat_tcp
-//	    iifname "eth0" meta l4proto tcp dnat ip to tcp dport map @dnat_tcp
-//	    iifname "eth0" meta l4proto udp jump dnat_xlat_udp
-//	    iifname "eth0" meta l4proto udp dnat ip to udp dport map @dnat_udp
+//	    fib daddr type local meta l4proto tcp jump dnat_xlat_tcp
+//	    fib daddr type local meta l4proto tcp dnat ip to tcp dport map @dnat_tcp
+//	    fib daddr type local meta l4proto udp jump dnat_xlat_udp
+//	    fib daddr type local meta l4proto udp dnat ip to udp dport map @dnat_udp
 //	  }
 //	  chain postrouting {
 //	    type nat hook postrouting priority srcnat;
+//	    iifname != "eth0" ct status dnat masquerade
 //	    oifname "eth0" masquerade
 //	  }
 //	}
@@ -104,6 +109,15 @@ type Manager struct {
 	mu       sync.Mutex
 	extIface string
 
+	// v6FibSupported records whether the running kernel accepts the
+	// nft `fib daddr type local` expression for ip6 tables. Probed
+	// once at Setup() — production kernels (TrueNAS SCALE,
+	// stock Debian/Ubuntu, …) all have `nft_fib_ipv6` loaded, but
+	// WSL2's stripped-down kernel does not. When false, v6
+	// prerouting falls back to the legacy `iifname == extIface`
+	// predicate (F-47 hairpin still works for v4, just not v6).
+	v6FibSupported bool
+
 	// Cached references after Setup so updates are O(1).
 	conn    *nftables.Conn
 	tableV4 *nftables.Table
@@ -130,6 +144,11 @@ func New(extIface string) *Manager {
 func (m *Manager) Setup() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Probe whether the kernel supports v6 fib expressions before we
+	// commit to a layout. Production kernels do; WSL2 doesn't. The
+	// probe is its own table+flush, isolated from anchord's state.
+	m.v6FibSupported = probeV6FibSupported()
 
 	c := &nftables.Conn{}
 
@@ -223,10 +242,31 @@ func (m *Manager) installChains(c *nftables.Conn, t *nftables.Table, fam Family)
 	// DNAT rules for F-46 port-translating entries), then fall
 	// through to the map-based DNAT rule (catch-all for
 	// non-translating entries).
-	addXlatJump(c, pre, m.extIface, fam, unix.IPPROTO_TCP, m.xlatChainForFamProto(fam, "tcp"))
-	addDNATRule(c, pre, m.extIface, fam, unix.IPPROTO_TCP, m.mapForFamProto(fam, "tcp"))
-	addXlatJump(c, pre, m.extIface, fam, unix.IPPROTO_UDP, m.xlatChainForFamProto(fam, "udp"))
-	addDNATRule(c, pre, m.extIface, fam, unix.IPPROTO_UDP, m.mapForFamProto(fam, "udp"))
+	//
+	// F-47 / issue #11: v4 prerouting guards on `fib daddr type
+	// local` so DNAT fires for any packet whose destination is one
+	// of the anchor's own addresses — that covers LAN-ingress AND
+	// the bridge-sibling hairpin path. Forwarded-to-external traffic
+	// (non-local dst) falls through. v6 keeps the legacy iifname
+	// predicate because `nft_fib_ipv6` isn't always present on
+	// stripped-down kernels (e.g. WSL2). The reported hairpin
+	// scenarios are all v4; refactoring v6 once the inet-family
+	// consolidation lands (or once we add a runtime fib probe) is
+	// tracked separately.
+	addXlatJump(c, pre, m.extIface, fam, m.v6FibSupported, unix.IPPROTO_TCP, m.xlatChainForFamProto(fam, "tcp"))
+	addDNATRule(c, pre, m.extIface, fam, m.v6FibSupported, unix.IPPROTO_TCP, m.mapForFamProto(fam, "tcp"))
+	addXlatJump(c, pre, m.extIface, fam, m.v6FibSupported, unix.IPPROTO_UDP, m.xlatChainForFamProto(fam, "udp"))
+	addDNATRule(c, pre, m.extIface, fam, m.v6FibSupported, unix.IPPROTO_UDP, m.mapForFamProto(fam, "udp"))
+
+	// F-47 hairpin SNAT: a sibling on a bridge talking to the anchor's
+	// public IP gets DNAT'd, but the backend would reply directly via
+	// L2 (bypassing the anchor) and the sibling would reject the
+	// unexpected 4-tuple. SNAT here so the backend replies via the
+	// anchor and conntrack reverses both translations.
+	// `iifname != extIface` excludes the LAN-ingress path so F-9
+	// (client source IP preservation) still holds for external clients.
+	// Works for both families — Meta/Ct/Bitwise don't need nft_fib.
+	addHairpinSnatRule(c, post, m.extIface)
 
 	// Masquerade outbound on the external interface — auto-tracks the
 	// current DHCP-assigned source address, so we don't need to update
@@ -266,37 +306,111 @@ func (m *Manager) xlatChainForFamProto(fam Family, proto string) *nftables.Chain
 	return nil
 }
 
+// probeV6FibSupported returns true iff the running kernel accepts
+// `fib daddr type local` in an ip6 NAT chain. Production kernels
+// (TrueNAS SCALE, stock Debian/Ubuntu, Alpine on real Linux hosts)
+// have `nft_fib_ipv6` loaded; WSL2's stripped-down kernel does not,
+// so the test runner in CI/dev falls through to the iifname-based
+// guard for v6.
+//
+// The probe builds a throwaway table with a single fib-using rule,
+// commits it, observes the result, and best-effort cleans up. It
+// does NOT touch any anchord_* state, so a failed probe leaves no
+// residue. The cleanup happens unconditionally — if create-and-flush
+// succeeded, delete the table; if it failed, no table exists to
+// delete, the second flush is a no-op error we ignore.
+func probeV6FibSupported() bool {
+	const probeName = "anchord_v6fib_probe"
+
+	c := &nftables.Conn{}
+	tbl := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv6, Name: probeName})
+	ch := c.AddChain(&nftables.Chain{
+		Name: "pre", Table: tbl,
+		Type:     nftables.ChainTypeNAT,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityNATDest,
+	})
+	c.AddRule(&nftables.Rule{Table: tbl, Chain: ch, Exprs: []expr.Any{
+		&expr.Fib{Register: 1, FlagDADDR: true, ResultADDRTYPE: true},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}})
+	supported := c.Flush() == nil
+
+	// Best-effort cleanup. If the probe failed mid-flight the table
+	// may not exist; DelTable+Flush of a non-existent table errors
+	// silently — that's fine.
+	cleanup := &nftables.Conn{}
+	cleanup.DelTable(&nftables.Table{Family: nftables.TableFamilyIPv6, Name: probeName})
+	_ = cleanup.Flush()
+
+	return supported
+}
+
+// preroutingGuardExprs returns the two-expression guard that scopes
+// each DNAT rule. v4 always uses `fib daddr type local` (F-47 /
+// issue #11) so DNAT fires for any destination the anchor owns —
+// that covers both LAN ingress and bridge-sibling hairpin.
+//
+// v6 uses fib when the kernel supports it (probeV6FibSupported in
+// Setup), else falls back to `iifname == extIface`. v6 hairpin is
+// available on production kernels; on WSL2/CI the fallback loses
+// hairpin for v6 but keeps LAN-ingress DNAT working.
+//
+// For both families fib writes a uint32 into the destination
+// register for NFT_FIB_RESULT_ADDRTYPE, so the Cmp data is a 4-byte
+// native-endian value of unix.RTN_LOCAL.
+func preroutingGuardExprs(iface string, fam Family, v6FibSupported bool) []expr.Any {
+	useFib := fam == V4 || v6FibSupported
+	if !useFib {
+		return []expr.Any{
+			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifaceBytes(iface)},
+		}
+	}
+	return []expr.Any{
+		&expr.Fib{
+			Register:       1,
+			FlagDADDR:      true,
+			ResultADDRTYPE: true,
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     binaryutil.NativeEndian.PutUint32(uint32(unix.RTN_LOCAL)),
+		},
+	}
+}
+
 // addXlatJump installs the prerouting → dnat_xlat_* jump rule:
 //
-//	iifname EXT meta l4proto P jump dnat_xlat_P
+//	<guard> meta l4proto P jump dnat_xlat_P
+//
+// where `<guard>` is `fib daddr type local` for v4 (and for v6 when
+// the kernel supports it), else `iifname == extIface` for v6 (see
+// preroutingGuardExprs).
 //
 // The jump fires before the map-lookup rule. If the sub-chain has a
 // matching literal-DNAT entry it short-circuits the rest of
 // prerouting (DNAT is a terminal verdict); otherwise the jump
 // returns and the map rule runs.
-func addXlatJump(c *nftables.Conn, from *nftables.Chain, iface string, fam Family, proto byte, to *nftables.Chain) {
-	_ = fam // chain family is implicit via the table
-	exprs := []expr.Any{
-		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifaceBytes(iface)},
+func addXlatJump(c *nftables.Conn, from *nftables.Chain, iface string, fam Family, v6FibSupported bool, proto byte, to *nftables.Chain) {
+	exprs := append(preroutingGuardExprs(iface, fam, v6FibSupported),
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
 		&expr.Verdict{Kind: expr.VerdictJump, Chain: to.Name},
-	}
+	)
 	c.AddRule(&nftables.Rule{Table: from.Table, Chain: from, Exprs: exprs})
 }
 
 // addDNATRule installs the catch-all map-lookup rule:
 //
-//	iifname EXT meta l4proto P dnat to tcp dport map @MAP
+//	<guard> meta l4proto P dnat to tcp dport map @MAP
 //
-// This is the pre-F-46 form unchanged. F-46 port translation lives
-// in the dnat_xlat_* sub-chain (see addXlatJump) which runs ahead
-// of this rule and short-circuits matching ports with literal DNAT.
-func addDNATRule(c *nftables.Conn, ch *nftables.Chain, iface string, fam Family, proto byte, set *nftables.Set) {
-	exprs := []expr.Any{
-		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifaceBytes(iface)},
+// F-46 port translation lives in the dnat_xlat_* sub-chain (see
+// addXlatJump) which runs ahead of this rule and short-circuits
+// matching ports with literal DNAT.
+func addDNATRule(c *nftables.Conn, ch *nftables.Chain, iface string, fam Family, v6FibSupported bool, proto byte, set *nftables.Set) {
+	exprs := append(preroutingGuardExprs(iface, fam, v6FibSupported),
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
 		&expr.Payload{
@@ -317,6 +431,42 @@ func addDNATRule(c *nftables.Conn, ch *nftables.Chain, iface string, fam Family,
 			Family:     uint32(addressFamily(fam)),
 			RegAddrMin: 2,
 		},
+	)
+	c.AddRule(&nftables.Rule{Table: ch.Table, Chain: ch, Exprs: exprs})
+}
+
+// addHairpinSnatRule installs the F-47 hairpin SNAT rule:
+//
+//	iifname != EXT ct status dnat masquerade
+//
+// Fires only for packets that (a) entered via a bridge, not the
+// macvlan, and (b) have already been DNAT'd by prerouting. The
+// effect is that a sibling-on-a-bridge hairpin gets its source IP
+// rewritten to the anchor's bridge IP so the backend's reply comes
+// back via the anchor instead of directly over L2 to the sibling
+// (which would otherwise drop the reply on 4-tuple mismatch).
+// External LAN clients (iif == EXT) are excluded so F-9 still holds.
+func addHairpinSnatRule(c *nftables.Conn, ch *nftables.Chain, iface string) {
+	// ct status & IPS_DST_NAT != 0 — bit 5 of the ct status word
+	// is set whenever prerouting installed a DNAT translation.
+	const ipsDstNat uint32 = 1 << 5
+	exprs := []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: ifaceBytes(iface)},
+		&expr.Ct{Key: expr.CtKeySTATUS, Register: 1},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask:           binaryutil.NativeEndian.PutUint32(ipsDstNat),
+			Xor:            binaryutil.NativeEndian.PutUint32(0),
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpNeq,
+			Register: 1,
+			Data:     binaryutil.NativeEndian.PutUint32(0),
+		},
+		&expr.Masq{},
 	}
 	c.AddRule(&nftables.Rule{Table: ch.Table, Chain: ch, Exprs: exprs})
 }
