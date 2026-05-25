@@ -18,12 +18,15 @@ before writing code. Don't quietly route around the design.
 
 ## Project status
 
-**Production.** `v1.0.0` tagged 2026-05-20. Running on a small
-self-hosted fleet (TrueNAS SCALE host, 6+ Compose stacks, ~14
-service-anchors — Mailcow, Authentik, Nextcloud-AIO, Traefik, …)
-under real workloads (SMTP, IMAP IDLE, LDAP binds, OIDC, Nextcloud
-Talk). The README's auto-generated TEST-REPORT block reflects the
-v1.0.0 cut: 269 unit + 74 e2e green, hash matched.
+**Production.** `v1.0.0` tagged 2026-05-20, `v1.2.1` cut 2026-05-25
+(hairpin DNAT fix, issue #11). Running on a bare-metal TrueNAS SCALE
+host (kernel 6.12.x, `nft_fib_ipv6` loaded), 9 Compose stacks, ~30
+anchord containers — Mailcow, Authentik, Nextcloud-AIO + Talk,
+Frigate, Traefik, MeshCentral, Vaultwarden, Xibo, CUPS — under
+real workloads (SMTP, IMAP IDLE, LDAP binds, OIDC, Nextcloud Talk
+WebSocket signaling, RTSP camera streams). The README's
+auto-generated TEST-REPORT block reflects the latest cut: 318 unit
++ 74 e2e green, hash matched.
 
 v2 pivot landed on `main` (2026-05-18): macvlan ownership moved from
 anchord to Docker. anchord no longer creates a `anchord-ext` child or
@@ -171,10 +174,16 @@ project genesis:
   auto-generated TEST-REPORT block is the release-readiness signal;
   release gate blocks tags that aren't on main or whose recorded
   hash is stale.
-- [ ] Real-host validation: run the e2e harness on an actual Linux
-  host with a physical VLAN sub-interface and confirm 70/70 without
-  `E2E_BRIDGE_FLOOD_FIX`. Closes the env-quirk caveat for good.
-  This is the **last** item before a v1 tag.
+- [x] Real-host validation by way of production deployment.
+  v1.0.x..v1.2.x has been running on a bare-metal TrueNAS SCALE
+  host (kernel 6.12.x with physical VLAN sub-interfaces) against
+  real workloads since 2026-05-20 — Mailcow IMAP IDLE, Nextcloud
+  Talk WebSocket signaling (including the v1.2.1 hairpin fix),
+  RTSP camera streams, OIDC + LDAP binds, the lot. Issue #11
+  (DNAT hairpin) was both discovered and end-to-end-verified on
+  this host. The `E2E_BRIDGE_FLOOD_FIX=0` e2e run is still nice
+  to have for the synthetic harness, but production has been the
+  stronger signal in practice.
 - [x] Prometheus metrics surface decided + implemented (SPEC §2.7,
   F-30..F-32, N-5). 12 metrics across both modes, bounded label
   cardinality, custom collector for `dhcp_lease_remaining_seconds`
