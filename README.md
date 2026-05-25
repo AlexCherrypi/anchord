@@ -523,8 +523,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-25T23:16:30Z
-- **Code hash:** `sha256:ba2ce73051817f0bd34b1fc9d98bb4725957d5d12c1fb1ab79738ca263709e53`
+- **Last verified:** 2026-05-25T23:30:02Z
+- **Code hash:** `sha256:c03a3fb312310688ba3dfacf2d2eadac8fdcac65e171586487752739a8c54ea1`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -896,12 +896,12 @@ release-readiness signal.
 | `v6-only` | S-6 logs show graceful shutdown | ✓ |
 | `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `both` | anchord container running | ✓ |
-| `both` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `both` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `both` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `both` | nftables anchord_v4 table installed | ✓ |
 | `both` | nftables anchord_v6 table installed | ✓ |
-| `both` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
-| `both` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `both` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `both` | S-2 (v4) source IP preserved through DNAT | ✓ |
@@ -926,12 +926,12 @@ release-readiness signal.
 | `none` | S-6 logs show graceful shutdown | ✓ |
 | `none` | S-6 nat teardown clean (no warnings) | ✓ |
 | `dhcpv6-stateful` | anchord container running | ✓ |
-| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `dhcpv6-stateful` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v4 table installed | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v6 table installed | ✓ |
-| `dhcpv6-stateful` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
-| `dhcpv6-stateful` | eth1 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
+| `dhcpv6-stateful` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
+| `dhcpv6-stateful` | eth0 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
 | `dhcpv6-stateful` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | S-2 (v4) source IP preserved through DNAT | ✓ |
