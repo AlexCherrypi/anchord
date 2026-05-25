@@ -302,6 +302,56 @@ mysql, doesn't proxy to it, doesn't see the traffic. That's intentional:
 internal traffic should be as fast and as boring as standard Docker
 networking already is.
 
+### Hairpin (sibling container hits the project's own public IP)
+
+```
+sibling on backend bridge ──tcp:443──▶ project's public IP (192.168.150.70)
+                              │
+                              ▼ (sibling's default route via anchord)
+              [anchord's bridge iface, e.g. "eth3"]
+                              │
+                              ▼
+              [nftables prerouting, family ip]
+                  fib daddr type local …  ← matches: 192.168.150.70 is local to anchord
+                              │
+                              ▼
+                  …dnat to tcp dport map @dnat_tcp
+                              │       lookup yields fe-anchor's transit IP (172.16.1.15)
+                              ▼
+              [routing: same bridge as the sibling]
+                              │
+                              ▼
+              [nftables postrouting]
+                  iifname != "eth0" ct status dnat masquerade
+                              │   ← SNATs source to anchord's bridge IP
+                              ▼
+              [anchord's bridge iface — packet leaves with src = anchord's bridge IP]
+                              │
+                              ▼
+                       fe-anchor (172.16.1.15)
+                          backend sees:
+                            - dst: its own IP on its own interface
+                            - src: anchord's bridge IP (not the sibling — see below)
+```
+
+The return path: backend replies with `dst = anchord's bridge IP`,
+which routes back via the anchor; conntrack reverses both the DNAT
+and the SNAT in one step, so the sibling's TCP stack sees the reply
+arrive from the same public IP it originally sent to.
+
+Critical property: **without the postrouting SNAT this is broken**.
+Backend and sibling sit on the same bridge, so a naively-DNAT'd
+packet would prompt the backend to L2-reply directly to the sibling,
+which would drop the response on 4-tuple mismatch (it expected the
+public IP to answer, not the backend's bridge IP). The SNAT pushes
+the reply through the anchor where conntrack can do its job.
+
+Trade-off: F-9 (preserve original source IP on inbound) does not
+apply to hairpin — the backend sees the anchor's bridge IP instead
+of the sibling's. That is acceptable in practice because hairpinned
+traffic is internal to the project, so spam scoring / audit logs /
+IP allowlists are not relevant in this direction.
+
 ## How anchord keeps the NAT state correct
 
 anchord is a control plane, not a data plane. It never touches packets;

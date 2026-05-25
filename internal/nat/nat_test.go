@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
+	"github.com/google/nftables/expr"
+	"golang.org/x/sys/unix"
 )
 
 func TestFamilyString(t *testing.T) {
@@ -62,6 +65,62 @@ func TestAddressFamily(t *testing.T) {
 	if got, want := addressFamily(V6), uint32(nftables.TableFamilyIPv6); got != want {
 		t.Errorf("V6: got %d want %d", got, want)
 	}
+}
+
+// TestPreroutingGuardExprs pins the F-47 prerouting guard shape.
+// v4 must use `fib daddr type local` (Fib + Cmp == RTN_LOCAL), v6
+// keeps the legacy `iifname == extIface` (Meta + Cmp == iface) until
+// we either probe for nft_fib_ipv6 at startup or move to the inet
+// family. A regression that re-introduces an iifname predicate on
+// v4 surfaces here as a mismatched expression list.
+func TestPreroutingGuardExprs(t *testing.T) {
+	t.Run("v4 uses fib daddr type local", func(t *testing.T) {
+		got := preroutingGuardExprs("eth0", V4)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 exprs, got %d", len(got))
+		}
+		fib, ok := got[0].(*expr.Fib)
+		if !ok {
+			t.Fatalf("first expr is %T, want *expr.Fib", got[0])
+		}
+		if !fib.FlagDADDR {
+			t.Error("Fib.FlagDADDR not set")
+		}
+		if !fib.ResultADDRTYPE {
+			t.Error("Fib.ResultADDRTYPE not set")
+		}
+		if fib.Register != 1 {
+			t.Errorf("Fib.Register = %d, want 1", fib.Register)
+		}
+		cmp, ok := got[1].(*expr.Cmp)
+		if !ok {
+			t.Fatalf("second expr is %T, want *expr.Cmp", got[1])
+		}
+		if cmp.Op != expr.CmpOpEq {
+			t.Errorf("Cmp.Op = %v, want CmpOpEq", cmp.Op)
+		}
+		wantData := binaryutil.NativeEndian.PutUint32(uint32(unix.RTN_LOCAL))
+		if !bytes.Equal(cmp.Data, wantData) {
+			t.Errorf("Cmp.Data = % x, want % x (RTN_LOCAL)", cmp.Data, wantData)
+		}
+	})
+	t.Run("v6 falls back to iifname", func(t *testing.T) {
+		got := preroutingGuardExprs("eth0", V6)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 exprs, got %d", len(got))
+		}
+		m, ok := got[0].(*expr.Meta)
+		if !ok || m.Key != expr.MetaKeyIIFNAME {
+			t.Fatalf("v6 first expr = %T, want Meta{IIFNAME}", got[0])
+		}
+		cmp, ok := got[1].(*expr.Cmp)
+		if !ok || cmp.Op != expr.CmpOpEq {
+			t.Fatalf("v6 second expr unexpected: %T", got[1])
+		}
+		if !bytes.Equal(cmp.Data, ifaceBytes("eth0")) {
+			t.Errorf("v6 Cmp.Data = % x, want ifaceBytes(eth0)", cmp.Data)
+		}
+	})
 }
 
 // TestMapForFamProto verifies the family/proto -> set lookup table
