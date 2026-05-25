@@ -523,8 +523,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-23T13:44:45Z
-- **Code hash:** `sha256:86847f79079a156afd50c1eb7ffc422a112d3a16460627f7735635feae6a1525`
+- **Last verified:** 2026-05-25T23:16:30Z
+- **Code hash:** `sha256:ba2ce73051817f0bd34b1fc9d98bb4725957d5d12c1fb1ab79738ca263709e53`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -532,12 +532,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 315 | 0 | 0 | 315 |
+| Go unit tests | 318 | 0 | 0 | 318 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **389** | **0** | **0** | **389** |
+| **All tests** | **392** | **0** | **0** | **392** |
 
 <details>
-<summary>Go unit tests &mdash; 315/315 passed</summary>
+<summary>Go unit tests &mdash; 318/318 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -815,6 +815,9 @@ release-readiness signal.
 | `internal/nat` | `TestIfaceBytes/short_name_padded` | ✓ |
 | `internal/nat` | `TestIfaceBytes/typical_eth0` | ✓ |
 | `internal/nat` | `TestMapForFamProto` | ✓ |
+| `internal/nat` | `TestPreroutingGuardExprs/v4_always_uses_fib_(kernel_support_irrelevant)` | ✓ |
+| `internal/nat` | `TestPreroutingGuardExprs/v6_with_fib_support_uses_fib` | ✓ |
+| `internal/nat` | `TestPreroutingGuardExprs/v6_without_fib_support_falls_back_to_iifname` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_DualStack` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_Empty` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_F46PortTranslation` | ✓ |
@@ -879,11 +882,11 @@ release-readiness signal.
 | `v4-only` | S-6 logs show graceful shutdown | ✓ |
 | `v4-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `v6-only` | anchord container running | ✓ |
-| `v6-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `v6-only` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `v6-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v6-only` | nftables anchord_v4 table installed | ✓ |
 | `v6-only` | nftables anchord_v6 table installed | ✓ |
-| `v6-only` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `v6-only` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `v6-only` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `v6-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v6-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
@@ -909,12 +912,12 @@ release-readiness signal.
 | `both` | S-6 logs show graceful shutdown | ✓ |
 | `both` | S-6 nat teardown clean (no warnings) | ✓ |
 | `none` | anchord container running | ✓ |
-| `none` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `none` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `none` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `none` | nftables anchord_v4 table installed | ✓ |
 | `none` | nftables anchord_v6 table installed | ✓ |
-| `none` | eth0 keeps Docker-bootstrapped IPv4 | ✓ |
-| `none` | eth0 keeps Docker-bootstrapped IPv6 | ✓ |
+| `none` | eth1 keeps Docker-bootstrapped IPv4 | ✓ |
+| `none` | eth1 keeps Docker-bootstrapped IPv6 | ✓ |
 | `none` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `none` | S-2 (v6) source IP preserved through DNAT | ✓ |
 | `none` | S-3 dnat_tcp:25 reflects current transit IP within 8s | ✓ |
