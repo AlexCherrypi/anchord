@@ -352,6 +352,15 @@ of the sibling's. That is acceptable in practice because hairpinned
 traffic is internal to the project, so spam scoring / audit logs /
 IP allowlists are not relevant in this direction.
 
+v6 caveat: the fib-based guard requires the `nft_fib_ipv6` kernel
+module. All production-grade Linux kernels load it (TrueNAS SCALE,
+stock Debian / Ubuntu, Alpine on a physical host). WSL2 ships a
+stripped-down kernel without it, so anchord probes for the
+expression at Setup() and falls back to the legacy
+`iifname == extIface` predicate for v6 prerouting when the probe
+fails — v6 hairpin is lost there, but LAN-ingress DNAT and v4
+hairpin remain intact.
+
 ## How anchord keeps the NAT state correct
 
 anchord is a control plane, not a data plane. It never touches packets;

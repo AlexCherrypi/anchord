@@ -503,13 +503,18 @@ func TestIntegrationConcurrentSetMapDifferentMaps(t *testing.T) {
 // `fib daddr type local` (not `iifname == extIface`) and postrouting
 // must carry the hairpin SNAT rule ahead of the egress masquerade.
 //
-// Without this, packets from a sibling on a bridge that target the
-// anchor's macvlan IP either don't get DNAT'd (old iifname-only
+// v4 always uses fib. v6 uses fib when the running kernel supports
+// `nft_fib_ipv6` (probed at Setup); on stripped-down kernels
+// (e.g. WSL2 CI) v6 falls back to the legacy iifname predicate.
+//
+// Without this fix, packets from a sibling on a bridge that target
+// the anchor's macvlan IP either don't get DNAT'd (old iifname-only
 // predicate) or get DNAT'd but the reply skips the anchor (no
 // hairpin SNAT), and the sibling drops the unexpected 4-tuple.
 func TestIntegrationHairpinRulesInstalled(t *testing.T) {
 	requireNetAdmin(t)
-	_ = newManager(t)
+	m := newManager(t)
+	t.Logf("v6 fib support probed: %v", m.v6FibSupported)
 
 	c := &nftables.Conn{}
 	for _, family := range []Family{V4, V6} {
@@ -524,19 +529,20 @@ func TestIntegrationHairpinRulesInstalled(t *testing.T) {
 			tbl := &nftables.Table{Name: tableName, Family: tableFam}
 
 			// Prerouting: 4 rules (xlat-jump + dnat-lookup per proto).
-			// v4 must NOT start with Meta IIFNAME (F-47 regression
-			// would re-introduce the old iifname predicate); v6 still
-			// uses Meta IIFNAME until nft_fib_ipv6 support is
-			// universal (see preroutingGuardExprs in nat.go).
+			// v4 must NEVER start with Meta IIFNAME (F-47 regression
+			// would re-introduce the old iifname predicate). v6 must
+			// match the kernel-probe-decided shape: fib when supported,
+			// iifname otherwise.
 			//
-			// Why not assert *expr.Fib directly for v4: google/nftables
-			// v0.2.0 doesn't unmarshal the "fib" expression (its
-			// parser-switch doesn't have a "fib" case), so c.GetRules
-			// silently drops the Fib expression. The Cmp that follows
-			// it survives, so a v4 rule reads back as
-			// `Cmp(RTN_LOCAL) + Meta L4PROTO + Cmp(proto) + …`. A
-			// regression that re-introduces iifname would surface as
-			// `Meta{IIFNAME}` in slot 0, which we catch here.
+			// Why not assert *expr.Fib directly: google/nftables v0.2.0
+			// doesn't unmarshal the "fib" expression (its parser-switch
+			// has no "fib" case), so c.GetRules silently drops the Fib
+			// expression. The Cmp that follows it survives, so a fib
+			// rule reads back as
+			// `Cmp(RTN_LOCAL) + Meta L4PROTO + Cmp(proto) + …`. We
+			// detect the layout by the *absence* of Meta IIFNAME at
+			// slot 0 (the iifname-fallback shape has it).
+			expectFib := fam == V4 || m.v6FibSupported
 			pre, err := c.GetRules(tbl, &nftables.Chain{Table: tbl, Name: "prerouting"})
 			if err != nil {
 				t.Fatalf("GetRules(prerouting): %v", err)
@@ -549,14 +555,14 @@ func TestIntegrationHairpinRulesInstalled(t *testing.T) {
 					t.Errorf("prerouting rule %d: too few exprs (%d)", i, len(r.Exprs))
 					continue
 				}
-				if fam == V4 {
-					if m, ok := r.Exprs[0].(*expr.Meta); ok && m.Key == expr.MetaKeyIIFNAME {
-						t.Errorf("v4 prerouting rule %d: first expr is Meta{IIFNAME} — F-47 regression, expected fib-based guard", i)
+				if expectFib {
+					if mt, ok := r.Exprs[0].(*expr.Meta); ok && mt.Key == expr.MetaKeyIIFNAME {
+						t.Errorf("%s prerouting rule %d: first expr is Meta{IIFNAME} — F-47 regression, expected fib-based guard", fam, i)
 					}
 				} else {
-					m, ok := r.Exprs[0].(*expr.Meta)
-					if !ok || m.Key != expr.MetaKeyIIFNAME {
-						t.Errorf("v6 prerouting rule %d: first expr = %T, want Meta{IIFNAME}", i, r.Exprs[0])
+					mt, ok := r.Exprs[0].(*expr.Meta)
+					if !ok || mt.Key != expr.MetaKeyIIFNAME {
+						t.Errorf("%s prerouting rule %d (iifname fallback expected): first expr = %T, want Meta{IIFNAME}", fam, i, r.Exprs[0])
 					}
 				}
 			}
