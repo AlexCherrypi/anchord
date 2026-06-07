@@ -532,6 +532,98 @@ func TestReattach_RestartDisabled_NoRestart(t *testing.T) {
 	}
 }
 
+// TestReattach_CallOrder asserts disconnect happens BEFORE connect.
+// Reverse order would leave Docker in a transient state where the
+// follower has two endpoints on the same network — for that moment
+// it has the *correct* attachment plus the stale one, which on some
+// kernels triggers ARP / IP-conflict warnings on the bridge. Order is
+// part of the contract, not an implementation detail.
+func TestReattach_CallOrder(t *testing.T) {
+	ops := newFakeOps()
+	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id"}
+	ops.containers = []ContainerInfo{
+		{ID: "follower-id", Names: []string{"/follower"}},
+	}
+	w := newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "follower",
+	})
+	w.reattach(context.Background(), "test")
+
+	var disconnectIdx, connectIdx = -1, -1
+	for i, c := range ops.callLog() {
+		if strings.HasPrefix(c, "NetworkDisconnect:") && disconnectIdx < 0 {
+			disconnectIdx = i
+		}
+		if strings.HasPrefix(c, "NetworkConnect:") && connectIdx < 0 {
+			connectIdx = i
+		}
+	}
+	if disconnectIdx < 0 || connectIdx < 0 {
+		t.Fatalf("expected both Disconnect and Connect calls, got %v", ops.callLog())
+	}
+	if disconnectIdx > connectIdx {
+		t.Errorf("Disconnect must precede Connect; got disconnect@%d connect@%d (full log: %v)",
+			disconnectIdx, connectIdx, ops.callLog())
+	}
+}
+
+// TestReattach_RestartAfterConnect asserts the restart (when enabled)
+// is the LAST step. A restart before the connect would tear down the
+// follower's process before its replacement attachment is in place —
+// pointless extra downtime.
+func TestReattach_RestartAfterConnect(t *testing.T) {
+	ops := newFakeOps()
+	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id"}
+	ops.containers = []ContainerInfo{
+		{ID: "follower-id", Names: []string{"/follower"}},
+	}
+	w := newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "follower",
+		Restart:       true,
+	})
+	w.reattach(context.Background(), "test")
+
+	connectIdx, restartIdx := -1, -1
+	for i, c := range ops.callLog() {
+		if strings.HasPrefix(c, "NetworkConnect:") && connectIdx < 0 {
+			connectIdx = i
+		}
+		if strings.HasPrefix(c, "ContainerRestart:") && restartIdx < 0 {
+			restartIdx = i
+		}
+	}
+	if connectIdx < 0 || restartIdx < 0 {
+		t.Fatalf("expected both Connect and Restart calls, got %v", ops.callLog())
+	}
+	if restartIdx < connectIdx {
+		t.Errorf("Restart must follow Connect; got connect@%d restart@%d", connectIdx, restartIdx)
+	}
+}
+
+// TestReattach_ConnectFailureSkipsRestart asserts that if connect
+// fails (not via an absorbed "already exists"), the optional restart
+// is skipped — restarting on a half-done attach would extend the
+// outage rather than recover it.
+func TestReattach_ConnectFailureSkipsRestart(t *testing.T) {
+	ops := newFakeOps()
+	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id"}
+	ops.containers = []ContainerInfo{
+		{ID: "follower-id", Names: []string{"/follower"}},
+	}
+	ops.connectErr = errors.New("connection refused")
+	w := newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "follower",
+		Restart:       true,
+	})
+	w.reattach(context.Background(), "test")
+	if ops.restartedID != "" {
+		t.Errorf("restart must not fire when connect failed, got restart of %q", ops.restartedID)
+	}
+}
+
 func TestReattach_FollowerNotFound_NoConnect(t *testing.T) {
 	ops := newFakeOps()
 	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id"}
