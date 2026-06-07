@@ -254,6 +254,61 @@ type NetworkAnchor struct {
 	MetricsAddr string
 }
 
+// Rebinder holds resolved settings for the external-rebinder mode
+// (F-48). A rebinder sidecar lives in the follower stack and re-attaches
+// a configured follower container to a target bridge network every time
+// that network's Docker ID changes. See SPEC-EXTERNAL-REBINDER-DRAFT.md.
+type Rebinder struct {
+	// FollowNetwork is the Docker network *name* the follower should
+	// remain attached to. Required. Examples:
+	// "ix-mailcow_mailcow-network", "myapp_default". Matched by name
+	// on every event; the Docker ID is intentionally not stored
+	// because it's exactly what changes underneath us.
+	FollowNetwork string
+
+	// FollowTarget is the follower container to rebind. Required.
+	// Accepts either (a) a bare container name (matched against
+	// Names from ContainerList) or (b) a compose service name
+	// resolved within the sidecar's own compose project (matched
+	// against com.docker.compose.service=<X> AND
+	// com.docker.compose.project=<self project>).
+	FollowTarget string
+
+	// Restart toggles whether the rebinder issues `docker restart
+	// <follower>` after a successful reattach. Default false.
+	//
+	// Off is the right default for fresh-connect-per-request apps
+	// (Python requests, Go http.Client defaults). On is needed for
+	// apps with long-lived persistent pools (Java HikariCP, Go
+	// http.Client with IdleConnTimeout much larger than the recreate
+	// window). The operator knows the follower's connection-pool
+	// behaviour; anchord doesn't.
+	Restart bool
+
+	// EventBackoff is the grace period between observing a
+	// `network create` event and attempting reattach. Lets Docker
+	// finish wiring up the new bridge before we connect to it.
+	// Default 2s.
+	EventBackoff time.Duration
+
+	// SelfProject is the compose project the sidecar itself belongs
+	// to. Used to scope the service-name fallback for FollowTarget
+	// resolution. Auto-detected from COMPOSE_PROJECT_NAME if unset.
+	// May legitimately be "" for non-compose deployments — service-
+	// name resolution then degrades to container-name only.
+	SelfProject string
+
+	// DockerHost is the docker API endpoint. Default unix socket.
+	DockerHost string
+
+	// LogLevel: debug, info, warn, error.
+	LogLevel string
+
+	// MetricsAddr is the listen address for the Prometheus metrics
+	// endpoint. Default 127.0.0.1:9090. Empty disables the listener.
+	MetricsAddr string
+}
+
 // ServiceAnchor holds resolved settings for the service-anchor mode.
 type ServiceAnchor struct {
 	// GatewayHostname is the Docker-DNS name to look up for the
@@ -396,6 +451,38 @@ func LoadServiceAnchor() (*ServiceAnchor, error) {
 	}
 	if c.ResolveInterval <= 0 {
 		return nil, fmt.Errorf("ANCHORD_GATEWAY_RESOLVE_INTERVAL must be positive")
+	}
+	return c, nil
+}
+
+// LoadRebinder reads external-rebinder configuration from the environment.
+// See SPEC-EXTERNAL-REBINDER-DRAFT.md.
+func LoadRebinder() (*Rebinder, error) {
+	c := &Rebinder{
+		FollowNetwork: strings.TrimSpace(os.Getenv("ANCHORD_FOLLOW_NETWORK")),
+		FollowTarget:  strings.TrimSpace(os.Getenv("ANCHORD_FOLLOW_TARGET")),
+		SelfProject:   strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME")),
+		DockerHost:    getenvDefault("DOCKER_HOST", "unix:///var/run/docker.sock"),
+		LogLevel:      getenvDefault("ANCHORD_LOG_LEVEL", "info"),
+		MetricsAddr:   metricsAddrFromEnv(),
+	}
+	if c.FollowNetwork == "" {
+		return nil, fmt.Errorf("ANCHORD_FOLLOW_NETWORK must be set in external-rebinder mode")
+	}
+	if c.FollowTarget == "" {
+		return nil, fmt.Errorf("ANCHORD_FOLLOW_TARGET must be set in external-rebinder mode")
+	}
+	restart, err := parseBoolDefault("ANCHORD_FOLLOW_RESTART", false)
+	if err != nil {
+		return nil, err
+	}
+	c.Restart = restart
+	c.EventBackoff, err = parseDuration("ANCHORD_FOLLOW_EVENT_BACKOFF", 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if c.EventBackoff < 0 {
+		return nil, fmt.Errorf("ANCHORD_FOLLOW_EVENT_BACKOFF must be non-negative")
 	}
 	return c, nil
 }

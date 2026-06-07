@@ -42,6 +42,7 @@ import (
 	"github.com/AlexCherrypi/anchord/internal/health"
 	"github.com/AlexCherrypi/anchord/internal/metrics"
 	"github.com/AlexCherrypi/anchord/internal/nat"
+	"github.com/AlexCherrypi/anchord/internal/rebinder"
 	"github.com/AlexCherrypi/anchord/internal/reconciler"
 	"github.com/AlexCherrypi/anchord/internal/serviceanchor"
 	"github.com/AlexCherrypi/anchord/internal/sharednet"
@@ -61,6 +62,12 @@ const (
 	// namespaces. Doctor mode does not need ANCHORD_* daemon config
 	// — it speaks docker.sock and exits.
 	ModeDoctor Mode = "doctor"
+	// ModeRebinder is the F-48 external-network follower auto-rebind
+	// mode (issue #12). A sidecar in the follower's compose project
+	// that re-attaches a configured container to a target bridge
+	// network every time the network's Docker ID changes. See
+	// SPEC-EXTERNAL-REBINDER-DRAFT.md.
+	ModeRebinder Mode = "external-rebinder"
 )
 
 func main() {
@@ -101,6 +108,8 @@ func run() error {
 	case ModeDoctor:
 		// args[0]=binary, args[1]=doctor, args[2..]=subcommand+flags.
 		return runDoctor(ctx, os.Args[2:])
+	case ModeRebinder:
+		return runRebinder(ctx)
 	default:
 		return runNetworkAnchor(ctx)
 	}
@@ -123,11 +132,11 @@ func selectMode(args []string, envMode string) (Mode, error) {
 		return ModeNetworkAnchor, nil
 	}
 	switch Mode(mode) {
-	case ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor:
+	case ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor, ModeRebinder:
 		return Mode(mode), nil
 	default:
-		return "", fmt.Errorf("unknown mode %q (want %q, %q, or %q)",
-			mode, ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor)
+		return "", fmt.Errorf("unknown mode %q (want %q, %q, %q, or %q)",
+			mode, ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor, ModeRebinder)
 	}
 }
 
@@ -444,6 +453,41 @@ func printStaleReport(w io.Writer, stale []dependents.StaleNetns) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// runRebinder runs the F-48 external-network follower auto-rebind
+// sidecar. Watches `docker network events` for the configured target
+// network name and re-attaches the configured follower container every
+// time that network's Docker ID changes. See SPEC-EXTERNAL-REBINDER-
+// DRAFT.md for the contract.
+func runRebinder(ctx context.Context) error {
+	cfg, err := config.LoadRebinder()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	setupLogger(cfg.LogLevel)
+
+	// Health/metrics share the same listener pattern as the other
+	// modes. /readyz here is a pure liveness echo — the rebinder has
+	// no equivalent of "first reconcile complete" or "default route
+	// installed" to gate on, and the bootstrap recheck is best-effort
+	// (it intentionally tolerates the follower not yet existing).
+	startMetrics(ctx, cfg.MetricsAddr, map[string]http.Handler{
+		"/healthz": health.LivenessHandler(),
+		"/readyz":  health.LivenessHandler(),
+	})
+
+	cli, err := client.NewClientWithOpts(
+		client.WithHost(cfg.DockerHost),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer cli.Close()
+
+	w := rebinder.New(cli, cfg)
+	return w.Run(ctx)
 }
 
 // runServiceAnchor maintains a default route in the local namespace
