@@ -63,6 +63,13 @@ func (r *stubRouter) ReplaceDefaultRoute(family int, gw net.IP) error {
 		return errFail
 	}
 	r.replace = append(r.replace, op)
+	// Persist into the fake kernel state so the next RecordDefaultRoute
+	// reflects what's installed — matches real netlink semantics and
+	// lets the applyRoute short-circuit (kernel-match → no-op) fire.
+	if r.existingDefaults == nil {
+		r.existingDefaults = map[int]net.IP{}
+	}
+	r.existingDefaults[family] = gw
 	return nil
 }
 
@@ -70,12 +77,14 @@ func (r *stubRouter) RemoveDefaultRoute(family int, gw net.IP) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.remove = append(r.remove, routeOp{family: family, gw: gw.String()})
+	delete(r.existingDefaults, family)
 	return nil
 }
 
-// RecordDefaultRoute returns whatever the test seeded in
-// existingDefaults for the given family. Empty map / nil entry means
-// "no default route present" — the greenfield case.
+// RecordDefaultRoute returns the fake kernel's current default for the
+// given family. Tests can pre-seed via `existingDefaults` (e.g. F-39
+// wrap mode's pre-existing Docker bridge gateway); subsequent
+// ReplaceDefaultRoute calls update the same map.
 func (r *stubRouter) RecordDefaultRoute(family int) (net.IP, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -86,6 +95,15 @@ func (r *stubRouter) RecordDefaultRoute(family int) (net.IP, error) {
 		return ip, nil
 	}
 	return nil, nil
+}
+
+// flushDefault simulates an external `ip route del default` — the
+// fake kernel forgets the route for that family. Used by the
+// regression test for the "route flushed under our feet" scenario.
+func (r *stubRouter) flushDefault(family int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.existingDefaults, family)
 }
 
 func (r *stubRouter) replaceCount() int {
@@ -147,6 +165,69 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 
 	if got := rt.replaceCount(); got != 1 {
 		t.Errorf("expected 1 install, got %d (%#v)", got, rt.replace)
+	}
+}
+
+// TestReconcile_ReinstallsAfterExternalFlush is the regression guard
+// for the defensive-against-flushes change: if something external
+// (`ip route del default`, an unrelated tool, a kernel quirk)
+// removes the default route while the resolver IP stays the same,
+// the next reconcile must put the route back. Pre-fix behaviour
+// short-circuited on the in-memory cache match and missed this.
+func TestReconcile_ReinstallsAfterExternalFlush(t *testing.T) {
+	v4 := net.ParseIP("172.30.0.4")
+	m, _, rt := newTestManager([]net.IP{v4})
+
+	// First reconcile installs once and the fake kernel now holds it.
+	m.reconcile(context.Background())
+	if got := rt.replaceCount(); got != 1 {
+		t.Fatalf("initial install: expected 1 ReplaceDefaultRoute, got %d", got)
+	}
+
+	// Simulate the route being flushed externally — same scenario as
+	// `ip route del default` in the netns or a kernel quirk on link
+	// renumber. The resolver continues to return the same IP.
+	rt.flushDefault(unix.AF_INET)
+
+	m.reconcile(context.Background())
+
+	if got := rt.replaceCount(); got != 2 {
+		t.Errorf("expected reinstall after flush (2 total), got %d (%#v)",
+			got, rt.replace)
+	}
+
+	// And once back in place, further reconciles must NOT churn.
+	m.reconcile(context.Background())
+	m.reconcile(context.Background())
+	if got := rt.replaceCount(); got != 2 {
+		t.Errorf("expected no extra churn after reinstall, got %d (%#v)",
+			got, rt.replace)
+	}
+}
+
+// TestReconcile_ReinstallsWhenKernelHasDifferentGateway covers the
+// "drift" half of the defense: kernel has a default route, but to a
+// gateway different from our resolver-supplied one. Common cause:
+// network-anchor was recreated with a new transit IP and Docker DNS
+// already returned the new IP — but a stale route still points at
+// the old one. The applyRoute path must replace.
+func TestReconcile_ReinstallsWhenKernelHasDifferentGateway(t *testing.T) {
+	v4 := net.ParseIP("172.30.0.4")
+	m, _, rt := newTestManager([]net.IP{v4})
+
+	// Pre-seed a stale default — say, the old network-anchor's IP.
+	rt.existingDefaults = map[int]net.IP{
+		unix.AF_INET: net.ParseIP("172.30.0.99"),
+	}
+
+	m.reconcile(context.Background())
+
+	if got := rt.replaceCount(); got != 1 {
+		t.Errorf("expected replace on gateway drift, got %d (%#v)",
+			got, rt.replace)
+	}
+	if got := rt.lastReplace().gw; got != v4.String() {
+		t.Errorf("expected gateway %s, got %s", v4, got)
 	}
 }
 

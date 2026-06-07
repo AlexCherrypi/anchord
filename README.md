@@ -541,8 +541,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-06-07T14:03:55Z
-- **Code hash:** `sha256:9ef057ec96f3c578f4733a4c6eb311405dd5f5e172cdd6e70f7c4cac488b5b32`
+- **Last verified:** 2026-06-07T18:08:38Z
+- **Code hash:** `sha256:53620e57c9671d826f74428ee1bbee41a5a44d64eafafcb0bef01c8056e7eb4a`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -550,12 +550,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 392 | 0 | 0 | 392 |
+| Go unit tests | 394 | 0 | 0 | 394 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **466** | **0** | **0** | **466** |
+| **All tests** | **468** | **0** | **0** | **468** |
 
 <details>
-<summary>Go unit tests &mdash; 392/392 passed</summary>
+<summary>Go unit tests &mdash; 394/394 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -901,6 +901,8 @@ release-readiness signal.
 | `internal/serviceanchor` | `TestReconcile_InstallsBothFamilies` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_KeepsLastGoodOnLookupError` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_NoOpWhenUnchanged` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_ReinstallsAfterExternalFlush` | ✓ |
+| `internal/serviceanchor` | `TestReconcile_ReinstallsWhenKernelHasDifferentGateway` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_ReplacesOnIPChange` | ✓ |
 | `internal/serviceanchor` | `TestReconcile_RetriesAfterFailedInstall` | ✓ |
 | `internal/serviceanchor` | `TestRun_GreenfieldMode_NoRestore` | ✓ |
@@ -960,11 +962,11 @@ release-readiness signal.
 | Scenario | Assertion | Status |
 |---|---|:---:|
 | `v4-only` | anchord container running | ✓ |
-| `v4-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `v4-only` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `v4-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v4-only` | nftables anchord_v4 table installed | ✓ |
 | `v4-only` | nftables anchord_v6 table installed | ✓ |
-| `v4-only` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `v4-only` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
 | `v4-only` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `v4-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v4-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
@@ -988,12 +990,12 @@ release-readiness signal.
 | `v6-only` | S-6 logs show graceful shutdown | ✓ |
 | `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `both` | anchord container running | ✓ |
-| `both` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `both` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `both` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `both` | nftables anchord_v4 table installed | ✓ |
 | `both` | nftables anchord_v6 table installed | ✓ |
-| `both` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
-| `both` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `both` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `both` | S-2 (v4) source IP preserved through DNAT | ✓ |

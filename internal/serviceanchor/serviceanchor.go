@@ -261,25 +261,60 @@ func (m *Manager) reconcile(ctx context.Context) {
 	}
 }
 
-// applyRoute installs or replaces the default route for one family if
-// it differs from the last-applied gateway.
+// applyRoute installs or replaces the default route for one family.
+//
+// Defense against external flushes (e.g. `ip route del default`, an
+// unrelated tool in the netns, a kernel quirk, a sidecar bug): instead
+// of trusting an in-memory cache of "last gateway we installed", we
+// read the kernel's *current* default gateway each tick and only
+// short-circuit when it matches what we want.
+//
+// That mirrors the extroute package's `assert` pattern (issue #6).
+// Why bother: an in-memory short-circuit silently misses the case
+// where the resolved IP hasn't changed but the kernel route is gone —
+// anchord would believe everything is fine forever. The kernel read
+// is one cheap netlink list per family per tick (≈two syscalls at
+// 5 s cadence; negligible cost for a hard correctness guarantee).
 func (m *Manager) applyRoute(family int, gw net.IP) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if cur, ok := m.current[family]; ok && cur.Equal(gw) {
+	// Read kernel state. A lookup error is logged at debug and we
+	// fall through to the unconditional Replace below — Replace is
+	// idempotent so we can't make things worse, and the alternative
+	// (skip on error) would be the very passive behaviour we're
+	// fixing here.
+	kernelGW, err := m.router.RecordDefaultRoute(family)
+	if err != nil {
+		slog.Debug("default route lookup failed; will replace unconditionally",
+			"family", familyName(family), "err", err)
+	}
+	if kernelGW != nil && kernelGW.Equal(gw) {
+		// Kernel already has our gateway. Cache the value for
+		// cleanup()'s benefit and short-circuit.
+		m.current[family] = gw
 		return
 	}
+
+	reason := "drifted"
+	if kernelGW == nil {
+		reason = "missing"
+	}
+
 	if err := m.router.ReplaceDefaultRoute(family, gw); err != nil {
 		slog.Warn("default route install failed",
-			"family", familyName(family), "gw", gw, "err", err)
+			"family", familyName(family), "gw", gw,
+			"reason", reason, "prev", kernelGW, "err", err)
 		return
 	}
 	m.current[family] = gw
 	metrics.GatewayRouteReplaces.WithLabelValues(familyName(family)).Inc()
 	metrics.DefaultRoutePresent.WithLabelValues(familyName(family)).Set(1)
 	slog.Info("default route updated",
-		"family", familyName(family), "gateway", gw)
+		"family", familyName(family),
+		"gateway", gw,
+		"reason", reason,
+		"prev", kernelGW)
 	if m.OnRouteInstalled != nil {
 		m.OnRouteInstalled()
 	}
