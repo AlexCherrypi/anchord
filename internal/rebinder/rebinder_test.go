@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -376,6 +377,58 @@ func TestConsume_IgnoresUnrelatedNetwork(t *testing.T) {
 	_ = w.consume(ctx, ops.msgsCh, ops.errsCh)
 	if ops.connectedID != "" {
 		t.Errorf("must not reattach for unrelated network, got connect to %q", ops.connectedID)
+	}
+}
+
+// TestConsume_ReturnsOnErrChannel verifies a terminal error on the
+// event stream's errs channel propagates back to Run so it can
+// resubscribe. This is the path Docker daemon restarts / socket flaps
+// hit in production.
+func TestConsume_ReturnsOnErrChannel(t *testing.T) {
+	ops := newFakeOps()
+	w := newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "sync",
+	})
+
+	wantErr := errors.New("simulated docker event stream death")
+	ops.errsCh <- wantErr
+
+	got := w.consume(context.Background(), ops.msgsCh, ops.errsCh)
+	if !errors.Is(got, wantErr) {
+		t.Errorf("consume returned %v, want %v", got, wantErr)
+	}
+}
+
+// TestConsume_ReturnsOnErrChannelClosed verifies that a closed errs
+// channel (the SDK's other terminal signal) also returns control to
+// the caller — so Run's outer loop can resubscribe rather than
+// blocking on a dead channel forever.
+func TestConsume_ReturnsOnErrChannelClosed(t *testing.T) {
+	ops := newFakeOps()
+	w := newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "sync",
+	})
+	close(ops.errsCh)
+	got := w.consume(context.Background(), ops.msgsCh, ops.errsCh)
+	if got == nil || !strings.Contains(got.Error(), "error channel closed") {
+		t.Errorf("expected 'error channel closed' error, got %v", got)
+	}
+}
+
+// TestConsume_ReturnsOnMsgChannelClosed verifies the same for the
+// message channel — the SDK closes it on stream teardown.
+func TestConsume_ReturnsOnMsgChannelClosed(t *testing.T) {
+	ops := newFakeOps()
+	w := newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "sync",
+	})
+	close(ops.msgsCh)
+	got := w.consume(context.Background(), ops.msgsCh, ops.errsCh)
+	if got == nil || !strings.Contains(got.Error(), "message channel closed") {
+		t.Errorf("expected 'message channel closed' error, got %v", got)
 	}
 }
 

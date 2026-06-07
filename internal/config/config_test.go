@@ -959,3 +959,179 @@ func TestParseAddressMode(t *testing.T) {
 		})
 	}
 }
+
+// ---- LoadRebinder (F-48) ---------------------------------------------------
+
+// clearRebinderEnv blanks every env var LoadRebinder consults so each
+// test starts from a deterministic baseline.
+func clearRebinderEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"ANCHORD_FOLLOW_NETWORK",
+		"ANCHORD_FOLLOW_TARGET",
+		"ANCHORD_FOLLOW_RESTART",
+		"ANCHORD_FOLLOW_EVENT_BACKOFF",
+		"COMPOSE_PROJECT_NAME",
+		"DOCKER_HOST",
+		"ANCHORD_LOG_LEVEL",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("ANCHORD_METRICS_ADDR", "")
+	_ = os.Unsetenv("ANCHORD_METRICS_ADDR")
+}
+
+func TestLoadRebinder_RequiresFollowNetwork(t *testing.T) {
+	clearRebinderEnv(t)
+	t.Setenv("ANCHORD_FOLLOW_TARGET", "sync")
+	_, err := LoadRebinder()
+	if err == nil || !strings.Contains(err.Error(), "ANCHORD_FOLLOW_NETWORK") {
+		t.Fatalf("expected ANCHORD_FOLLOW_NETWORK error, got: %v", err)
+	}
+}
+
+func TestLoadRebinder_RequiresFollowTarget(t *testing.T) {
+	clearRebinderEnv(t)
+	t.Setenv("ANCHORD_FOLLOW_NETWORK", "ix-mailcow_mailcow-network")
+	_, err := LoadRebinder()
+	if err == nil || !strings.Contains(err.Error(), "ANCHORD_FOLLOW_TARGET") {
+		t.Fatalf("expected ANCHORD_FOLLOW_TARGET error, got: %v", err)
+	}
+}
+
+func TestLoadRebinder_MinimalRequiredVars(t *testing.T) {
+	clearRebinderEnv(t)
+	t.Setenv("ANCHORD_FOLLOW_NETWORK", "ix-mailcow_mailcow-network")
+	t.Setenv("ANCHORD_FOLLOW_TARGET", "sync")
+	cfg, err := LoadRebinder()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FollowNetwork != "ix-mailcow_mailcow-network" {
+		t.Errorf("FollowNetwork = %q", cfg.FollowNetwork)
+	}
+	if cfg.FollowTarget != "sync" {
+		t.Errorf("FollowTarget = %q", cfg.FollowTarget)
+	}
+	if cfg.Restart {
+		t.Errorf("Restart default should be false, got true")
+	}
+	if cfg.EventBackoff != 2*time.Second {
+		t.Errorf("EventBackoff default should be 2s, got %s", cfg.EventBackoff)
+	}
+	if cfg.SelfProject != "" {
+		t.Errorf("SelfProject should be empty when COMPOSE_PROJECT_NAME unset, got %q", cfg.SelfProject)
+	}
+}
+
+func TestLoadRebinder_SelfProjectFromCompose(t *testing.T) {
+	clearRebinderEnv(t)
+	t.Setenv("ANCHORD_FOLLOW_NETWORK", "net")
+	t.Setenv("ANCHORD_FOLLOW_TARGET", "tgt")
+	t.Setenv("COMPOSE_PROJECT_NAME", "follower-stack")
+	cfg, err := LoadRebinder()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SelfProject != "follower-stack" {
+		t.Errorf("SelfProject = %q, want follower-stack", cfg.SelfProject)
+	}
+}
+
+func TestLoadRebinder_RestartOptIn(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{"true", true},
+		{"1", true},
+		{"false", false},
+		{"0", false},
+		// Empty string is treated as "unset" by parseBoolDefault → default false.
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearRebinderEnv(t)
+			t.Setenv("ANCHORD_FOLLOW_NETWORK", "net")
+			t.Setenv("ANCHORD_FOLLOW_TARGET", "tgt")
+			if tc.raw != "" {
+				t.Setenv("ANCHORD_FOLLOW_RESTART", tc.raw)
+			}
+			cfg, err := LoadRebinder()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Restart != tc.want {
+				t.Errorf("Restart = %v, want %v", cfg.Restart, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRebinder_RestartInvalid(t *testing.T) {
+	clearRebinderEnv(t)
+	t.Setenv("ANCHORD_FOLLOW_NETWORK", "net")
+	t.Setenv("ANCHORD_FOLLOW_TARGET", "tgt")
+	t.Setenv("ANCHORD_FOLLOW_RESTART", "maybe")
+	_, err := LoadRebinder()
+	if err == nil || !strings.Contains(err.Error(), "ANCHORD_FOLLOW_RESTART") {
+		t.Fatalf("expected ANCHORD_FOLLOW_RESTART parse error, got: %v", err)
+	}
+}
+
+func TestLoadRebinder_EventBackoff(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"5s", 5 * time.Second},
+		{"500ms", 500 * time.Millisecond},
+		{"10", 10 * time.Second}, // parseDuration accepts bare seconds
+		{"0", 0},                  // zero is a valid (non-negative) backoff
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearRebinderEnv(t)
+			t.Setenv("ANCHORD_FOLLOW_NETWORK", "net")
+			t.Setenv("ANCHORD_FOLLOW_TARGET", "tgt")
+			t.Setenv("ANCHORD_FOLLOW_EVENT_BACKOFF", tc.raw)
+			cfg, err := LoadRebinder()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.EventBackoff != tc.want {
+				t.Errorf("EventBackoff = %s, want %s", cfg.EventBackoff, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRebinder_EventBackoffNegative(t *testing.T) {
+	clearRebinderEnv(t)
+	t.Setenv("ANCHORD_FOLLOW_NETWORK", "net")
+	t.Setenv("ANCHORD_FOLLOW_TARGET", "tgt")
+	t.Setenv("ANCHORD_FOLLOW_EVENT_BACKOFF", "-1s")
+	_, err := LoadRebinder()
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("expected non-negative error, got: %v", err)
+	}
+}
+
+func TestLoadRebinder_TrimWhitespace(t *testing.T) {
+	clearRebinderEnv(t)
+	// Operators copy-paste from compose; trailing whitespace shouldn't
+	// be a footgun.
+	t.Setenv("ANCHORD_FOLLOW_NETWORK", "  ix-mailcow_mailcow-network  ")
+	t.Setenv("ANCHORD_FOLLOW_TARGET", "  sync  ")
+	cfg, err := LoadRebinder()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FollowNetwork != "ix-mailcow_mailcow-network" {
+		t.Errorf("FollowNetwork not trimmed: %q", cfg.FollowNetwork)
+	}
+	if cfg.FollowTarget != "sync" {
+		t.Errorf("FollowTarget not trimmed: %q", cfg.FollowTarget)
+	}
+}
