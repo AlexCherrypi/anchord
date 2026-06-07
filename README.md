@@ -213,7 +213,7 @@ IPs, the maps update atomically and stale conntrack entries are flushed.
 
 ### One image, two modes
 
-The `anchord` image plays two roles in a project:
+The `anchord` image plays multiple roles. Two are core to every project:
 
 - **Network-anchor** (`ANCHORD_MODE=network-anchor`, the default). One per
   project. Joins the shared Docker macvlan network, optionally refreshes
@@ -224,8 +224,26 @@ The `anchord` image plays two roles in a project:
   route via it, and serves as the namespace owner that real application
   containers join via `network_mode: service:<anchor>`.
 
-Both roles run the same binary; the mode is just an env var. As an alternative
-spelling, `command: [service-anchor]` does the same as setting `ANCHORD_MODE`.
+Two additional sidecar modes (v1.3.0+, opt-in) deal with peer-stack
+recreate hazards anchord cannot fix from inside the network-anchor
+process:
+
+- **External-rebinder** (`ANCHORD_MODE=external-rebinder`, F-48). Sidecar
+  in a follower stack that re-attaches one of its containers to a target
+  bridge network every time that network's Docker ID changes. Closes the
+  failure class "my peer stack ran `compose down/up` and now my
+  `external: true` attachment points at a stale network ID."
+  Spec: [SPEC-EXTERNAL-REBINDER-DRAFT.md](SPEC-EXTERNAL-REBINDER-DRAFT.md).
+- **Wrap-rebinder** (`ANCHORD_MODE=wrap-rebinder`, F-49). Sidecar in a
+  wrap-stack that recreates its sibling wrap-anchors whenever their
+  `network_mode: container:<X>` target is recreated under the same
+  name. Closes the analogous failure class one layer down — stale netns
+  references instead of stale bridge references.
+  Spec: [SPEC-WRAP-REBINDER-DRAFT.md](SPEC-WRAP-REBINDER-DRAFT.md).
+
+All four roles run the same binary; mode is just an env var. As an
+alternative spelling, `command: [<mode>]` does the same as setting
+`ANCHORD_MODE`.
 
 ## Architecture
 
@@ -327,7 +345,7 @@ All via environment variables.
 
 | Variable                     | Required | Default            | Notes |
 |------------------------------|----------|--------------------|-------|
-| `ANCHORD_MODE`               | no       | `network-anchor`   | `network-anchor` or `service-anchor`. `command: [service-anchor]` is an equivalent override. |
+| `ANCHORD_MODE`               | no       | `network-anchor`   | `network-anchor`, `service-anchor`, `external-rebinder` (v1.3.0+, F-48), or `wrap-rebinder` (v1.3.0+, F-49). `command: [<mode>]` is an equivalent override. |
 | `ANCHORD_LOG_LEVEL`          | no       | `info`             | `debug`/`info`/`warn`/`error` |
 | `ANCHORD_METRICS_ADDR`       | no       | `127.0.0.1:9090`   | Prometheus `/metrics` listen address. Loopback-only by default to avoid LAN exposure on the macvlan; set `:9090` to scrape from other compose services. `""` disables. |
 
@@ -523,8 +541,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-05-25T23:30:02Z
-- **Code hash:** `sha256:c03a3fb312310688ba3dfacf2d2eadac8fdcac65e171586487752739a8c54ea1`
+- **Last verified:** 2026-06-07T14:03:55Z
+- **Code hash:** `sha256:9ef057ec96f3c578f4733a4c6eb311405dd5f5e172cdd6e70f7c4cac488b5b32`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -532,12 +550,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 318 | 0 | 0 | 318 |
+| Go unit tests | 392 | 0 | 0 | 392 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **392** | **0** | **0** | **392** |
+| **All tests** | **466** | **0** | **0** | **466** |
 
 <details>
-<summary>Go unit tests &mdash; 318/318 passed</summary>
+<summary>Go unit tests &mdash; 392/392 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -616,6 +634,22 @@ release-readiness signal.
 | `internal/config` | `TestFingerprintDeterministic` | ✓ |
 | `internal/config` | `TestFirstSelectorValue_Deterministic` | ✓ |
 | `internal/config` | `TestGetenvDefault` | ✓ |
+| `internal/config` | `TestLoadRebinder_EventBackoff/0` | ✓ |
+| `internal/config` | `TestLoadRebinder_EventBackoff/10` | ✓ |
+| `internal/config` | `TestLoadRebinder_EventBackoff/500ms` | ✓ |
+| `internal/config` | `TestLoadRebinder_EventBackoff/5s` | ✓ |
+| `internal/config` | `TestLoadRebinder_EventBackoffNegative` | ✓ |
+| `internal/config` | `TestLoadRebinder_MinimalRequiredVars` | ✓ |
+| `internal/config` | `TestLoadRebinder_RequiresFollowNetwork` | ✓ |
+| `internal/config` | `TestLoadRebinder_RequiresFollowTarget` | ✓ |
+| `internal/config` | `TestLoadRebinder_RestartInvalid` | ✓ |
+| `internal/config` | `TestLoadRebinder_RestartOptIn/#00` | ✓ |
+| `internal/config` | `TestLoadRebinder_RestartOptIn/0` | ✓ |
+| `internal/config` | `TestLoadRebinder_RestartOptIn/1` | ✓ |
+| `internal/config` | `TestLoadRebinder_RestartOptIn/false` | ✓ |
+| `internal/config` | `TestLoadRebinder_RestartOptIn/true` | ✓ |
+| `internal/config` | `TestLoadRebinder_SelfProjectFromCompose` | ✓ |
+| `internal/config` | `TestLoadRebinder_TrimWhitespace` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_Defaults` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_GatewayIPDualStack/192.168.150.1,fd00::1` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_GatewayIPDualStack/fd00::1,_192.168.150.1` | ✓ |
@@ -627,6 +661,11 @@ release-readiness signal.
 | `internal/config` | `TestLoadServiceAnchor_GatewayIPSingle/v6` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_Overrides` | ✓ |
 | `internal/config` | `TestLoadServiceAnchor_RejectsZeroInterval` | ✓ |
+| `internal/config` | `TestLoadWrapRebinder_CustomDurations` | ✓ |
+| `internal/config` | `TestLoadWrapRebinder_Defaults` | ✓ |
+| `internal/config` | `TestLoadWrapRebinder_PollIntervalPositive` | ✓ |
+| `internal/config` | `TestLoadWrapRebinder_RequiresProject` | ✓ |
+| `internal/config` | `TestLoadWrapRebinder_RestartTimeoutPositive` | ✓ |
 | `internal/config` | `TestLoad_AddressModeInvalid` | ✓ |
 | `internal/config` | `TestLoad_AddressModeOverride/bootstrap` | ✓ |
 | `internal/config` | `TestLoad_AddressModeOverride/dhcp-refresh` | ✓ |
@@ -818,6 +857,33 @@ release-readiness signal.
 | `internal/nat` | `TestPreroutingGuardExprs/v4_always_uses_fib_(kernel_support_irrelevant)` | ✓ |
 | `internal/nat` | `TestPreroutingGuardExprs/v6_with_fib_support_uses_fib` | ✓ |
 | `internal/nat` | `TestPreroutingGuardExprs/v6_without_fib_support_falls_back_to_iifname` | ✓ |
+| `internal/rebinder` | `TestBootstrapRecheck_Divergence_TriggersReattach` | ✓ |
+| `internal/rebinder` | `TestBootstrapRecheck_FollowerNotFound_DoesNotPanic` | ✓ |
+| `internal/rebinder` | `TestBootstrapRecheck_NetworkInspectError_DoesNotPanic` | ✓ |
+| `internal/rebinder` | `TestBootstrapRecheck_NoDivergence_NoReattach` | ✓ |
+| `internal/rebinder` | `TestConsume_DestroyIsLogOnly` | ✓ |
+| `internal/rebinder` | `TestConsume_DispatchesCreateToReattach` | ✓ |
+| `internal/rebinder` | `TestConsume_IgnoresUnrelatedNetwork` | ✓ |
+| `internal/rebinder` | `TestConsume_ReturnsOnErrChannel` | ✓ |
+| `internal/rebinder` | `TestConsume_ReturnsOnErrChannelClosed` | ✓ |
+| `internal/rebinder` | `TestConsume_ReturnsOnMsgChannelClosed` | ✓ |
+| `internal/rebinder` | `TestCtxSleep_CancelsEarly` | ✓ |
+| `internal/rebinder` | `TestCtxSleep_ZeroDuration` | ✓ |
+| `internal/rebinder` | `TestIsAlreadyConnected` | ✓ |
+| `internal/rebinder` | `TestIsAlreadyNotAttached` | ✓ |
+| `internal/rebinder` | `TestReattach_AlreadyConnected_TreatedAsSuccess` | ✓ |
+| `internal/rebinder` | `TestReattach_CallOrder` | ✓ |
+| `internal/rebinder` | `TestReattach_ConnectFailureSkipsRestart` | ✓ |
+| `internal/rebinder` | `TestReattach_FollowerNotFound_NoConnect` | ✓ |
+| `internal/rebinder` | `TestReattach_NotAttached_DisconnectAbsorbed` | ✓ |
+| `internal/rebinder` | `TestReattach_RestartAfterConnect` | ✓ |
+| `internal/rebinder` | `TestReattach_RestartDisabled_NoRestart` | ✓ |
+| `internal/rebinder` | `TestReattach_Restart_OptIn` | ✓ |
+| `internal/rebinder` | `TestResolveFollower_ComposeServicePreferred` | ✓ |
+| `internal/rebinder` | `TestResolveFollower_EmptyTarget` | ✓ |
+| `internal/rebinder` | `TestResolveFollower_NameFallback` | ✓ |
+| `internal/rebinder` | `TestResolveFollower_NotFound` | ✓ |
+| `internal/rebinder` | `TestRun_ExitsOnContextCancel` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_DualStack` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_Empty` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_F46PortTranslation` | ✓ |
@@ -859,6 +925,32 @@ release-readiness signal.
 | `internal/sharednet` | `TestPick_TieTransitCaseInsensitive/TRANSIT` | ✓ |
 | `internal/sharednet` | `TestPick_TieTransitCaseInsensitive/Transit` | ✓ |
 | `internal/sharednet` | `TestPick_TieTransitPreferred` | ✓ |
+| `internal/wraprebinder` | `TestBootstrapRecheck_DriftTriggersRecreate` | ✓ |
+| `internal/wraprebinder` | `TestBootstrapRecheck_ListError_NoRecreate` | ✓ |
+| `internal/wraprebinder` | `TestBootstrapRecheck_NameMatchNotDrift` | ✓ |
+| `internal/wraprebinder` | `TestBootstrapRecheck_NoDriftNoRecreate` | ✓ |
+| `internal/wraprebinder` | `TestBootstrapRecheck_TargetMissing_NoRecreate` | ✓ |
+| `internal/wraprebinder` | `TestBuildTargetPool_AcceptsNameReference` | ✓ |
+| `internal/wraprebinder` | `TestBuildTargetPool_ExcludesSelfID` | ✓ |
+| `internal/wraprebinder` | `TestBuildTargetPool_MultipleAnchorsSharingTarget` | ✓ |
+| `internal/wraprebinder` | `TestBuildTargetPool_OnlySelfProjectSiblings` | ✓ |
+| `internal/wraprebinder` | `TestBuildTargetPool_OrphanWhenTargetIDDead` | ✓ |
+| `internal/wraprebinder` | `TestBuildTargetPool_SkipsNonContainerNetmodes` | ✓ |
+| `internal/wraprebinder` | `TestConsume_IgnoresNonStartActions` | ✓ |
+| `internal/wraprebinder` | `TestConsume_ReturnsOnErrChannel` | ✓ |
+| `internal/wraprebinder` | `TestConsume_ReturnsOnMsgChannelClosed` | ✓ |
+| `internal/wraprebinder` | `TestEndToEnd_PoolEnumerationThenTargetStart` | ✓ |
+| `internal/wraprebinder` | `TestHandleStart_OwnProjectSiblingTriggersReenum` | ✓ |
+| `internal/wraprebinder` | `TestHandleStart_TrackedTargetTriggersRecreate` | ✓ |
+| `internal/wraprebinder` | `TestHandleStart_UnrelatedNameIgnored` | ✓ |
+| `internal/wraprebinder` | `TestRecreateAnchor_AfterWindowAllowed` | ✓ |
+| `internal/wraprebinder` | `TestRecreateAnchor_DifferentAnchorsNotSuppressed` | ✓ |
+| `internal/wraprebinder` | `TestRecreateAnchor_RapidRepeatSuppressed` | ✓ |
+| `internal/wraprebinder` | `TestResolveContainerByName_NameWithSlashPrefix` | ✓ |
+| `internal/wraprebinder` | `TestResolveTargetName_LongID` | ✓ |
+| `internal/wraprebinder` | `TestResolveTargetName_NotFound` | ✓ |
+| `internal/wraprebinder` | `TestResolveTargetName_ShortIDPrefix` | ✓ |
+| `internal/wraprebinder` | `TestRun_ExitsOnContextCancel` | ✓ |
 
 </details>
 
@@ -882,11 +974,11 @@ release-readiness signal.
 | `v4-only` | S-6 logs show graceful shutdown | ✓ |
 | `v4-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `v6-only` | anchord container running | ✓ |
-| `v6-only` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `v6-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `v6-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v6-only` | nftables anchord_v4 table installed | ✓ |
 | `v6-only` | nftables anchord_v6 table installed | ✓ |
-| `v6-only` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `v6-only` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `v6-only` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `v6-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v6-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
@@ -896,12 +988,12 @@ release-readiness signal.
 | `v6-only` | S-6 logs show graceful shutdown | ✓ |
 | `v6-only` | S-6 nat teardown clean (no warnings) | ✓ |
 | `both` | anchord container running | ✓ |
-| `both` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
+| `both` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
 | `both` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `both` | nftables anchord_v4 table installed | ✓ |
 | `both` | nftables anchord_v6 table installed | ✓ |
-| `both` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
-| `both` | eth1 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
+| `both` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
+| `both` | eth0 has IPv6 from fd99::/64 (RA or bootstrap) | ✓ |
 | `both` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `both` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `both` | S-2 (v4) source IP preserved through DNAT | ✓ |
@@ -926,12 +1018,12 @@ release-readiness signal.
 | `none` | S-6 logs show graceful shutdown | ✓ |
 | `none` | S-6 nat teardown clean (no warnings) | ✓ |
 | `dhcpv6-stateful` | anchord container running | ✓ |
-| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `dhcpv6-stateful` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `dhcpv6-stateful` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v4 table installed | ✓ |
 | `dhcpv6-stateful` | nftables anchord_v6 table installed | ✓ |
-| `dhcpv6-stateful` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
-| `dhcpv6-stateful` | eth0 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
+| `dhcpv6-stateful` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
+| `dhcpv6-stateful` | eth1 has IPv6 from fd99::/64 (DHCPv6 or bootstrap) | ✓ |
 | `dhcpv6-stateful` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | anchord_v6 dnat_tcp contains port 25 | ✓ |
 | `dhcpv6-stateful` | S-2 (v4) source IP preserved through DNAT | ✓ |
