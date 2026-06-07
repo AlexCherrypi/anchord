@@ -1118,6 +1118,86 @@ func TestLoadRebinder_EventBackoffNegative(t *testing.T) {
 	}
 }
 
+// ---- LoadWrapRebinder (F-49) -----------------------------------------------
+
+func clearWrapRebinderEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"COMPOSE_PROJECT_NAME",
+		"ANCHORD_WRAP_POLL_INTERVAL",
+		"ANCHORD_WRAP_RESTART_TIMEOUT",
+		"DOCKER_HOST",
+		"ANCHORD_LOG_LEVEL",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("ANCHORD_METRICS_ADDR", "")
+	_ = os.Unsetenv("ANCHORD_METRICS_ADDR")
+}
+
+func TestLoadWrapRebinder_RequiresProject(t *testing.T) {
+	clearWrapRebinderEnv(t)
+	_, err := LoadWrapRebinder()
+	if err == nil || !strings.Contains(err.Error(), "COMPOSE_PROJECT_NAME") {
+		t.Fatalf("expected COMPOSE_PROJECT_NAME error, got: %v", err)
+	}
+}
+
+func TestLoadWrapRebinder_Defaults(t *testing.T) {
+	clearWrapRebinderEnv(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "mailcow-anchord-wrap")
+	cfg, err := LoadWrapRebinder()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SelfProject != "mailcow-anchord-wrap" {
+		t.Errorf("SelfProject = %q", cfg.SelfProject)
+	}
+	if cfg.PollInterval != 30*time.Second {
+		t.Errorf("PollInterval default = %s, want 30s", cfg.PollInterval)
+	}
+	if cfg.RestartTimeout != 10*time.Second {
+		t.Errorf("RestartTimeout default = %s, want 10s", cfg.RestartTimeout)
+	}
+}
+
+func TestLoadWrapRebinder_PollIntervalPositive(t *testing.T) {
+	clearWrapRebinderEnv(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "ws")
+	t.Setenv("ANCHORD_WRAP_POLL_INTERVAL", "0s")
+	_, err := LoadWrapRebinder()
+	if err == nil || !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("expected must-be-positive error for poll, got: %v", err)
+	}
+}
+
+func TestLoadWrapRebinder_RestartTimeoutPositive(t *testing.T) {
+	clearWrapRebinderEnv(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "ws")
+	t.Setenv("ANCHORD_WRAP_RESTART_TIMEOUT", "0s")
+	_, err := LoadWrapRebinder()
+	if err == nil || !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("expected must-be-positive error for restart timeout, got: %v", err)
+	}
+}
+
+func TestLoadWrapRebinder_CustomDurations(t *testing.T) {
+	clearWrapRebinderEnv(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "ws")
+	t.Setenv("ANCHORD_WRAP_POLL_INTERVAL", "1m")
+	t.Setenv("ANCHORD_WRAP_RESTART_TIMEOUT", "5s")
+	cfg, err := LoadWrapRebinder()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PollInterval != time.Minute {
+		t.Errorf("PollInterval = %s, want 1m", cfg.PollInterval)
+	}
+	if cfg.RestartTimeout != 5*time.Second {
+		t.Errorf("RestartTimeout = %s, want 5s", cfg.RestartTimeout)
+	}
+}
+
 func TestLoadRebinder_TrimWhitespace(t *testing.T) {
 	clearRebinderEnv(t)
 	// Operators copy-paste from compose; trailing whitespace shouldn't

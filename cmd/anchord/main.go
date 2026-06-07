@@ -46,6 +46,7 @@ import (
 	"github.com/AlexCherrypi/anchord/internal/reconciler"
 	"github.com/AlexCherrypi/anchord/internal/serviceanchor"
 	"github.com/AlexCherrypi/anchord/internal/sharednet"
+	"github.com/AlexCherrypi/anchord/internal/wraprebinder"
 
 	"github.com/docker/docker/client"
 )
@@ -68,6 +69,13 @@ const (
 	// network every time the network's Docker ID changes. See
 	// SPEC-EXTERNAL-REBINDER-DRAFT.md.
 	ModeRebinder Mode = "external-rebinder"
+	// ModeWrapRebinder is the F-49 wrap-anchor netns-target auto-
+	// rebind mode (issue #13). A sidecar in the wrap-stack's compose
+	// project that auto-discovers wrap-anchors via
+	// `network_mode: container:<X>` and `docker restart`s each one
+	// when its target is recreated under the same name. See
+	// SPEC-WRAP-REBINDER-DRAFT.md.
+	ModeWrapRebinder Mode = "wrap-rebinder"
 )
 
 func main() {
@@ -110,6 +118,8 @@ func run() error {
 		return runDoctor(ctx, os.Args[2:])
 	case ModeRebinder:
 		return runRebinder(ctx)
+	case ModeWrapRebinder:
+		return runWrapRebinder(ctx)
 	default:
 		return runNetworkAnchor(ctx)
 	}
@@ -132,11 +142,11 @@ func selectMode(args []string, envMode string) (Mode, error) {
 		return ModeNetworkAnchor, nil
 	}
 	switch Mode(mode) {
-	case ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor, ModeRebinder:
+	case ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor, ModeRebinder, ModeWrapRebinder:
 		return Mode(mode), nil
 	default:
-		return "", fmt.Errorf("unknown mode %q (want %q, %q, %q, or %q)",
-			mode, ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor, ModeRebinder)
+		return "", fmt.Errorf("unknown mode %q (want %q, %q, %q, %q, or %q)",
+			mode, ModeNetworkAnchor, ModeServiceAnchor, ModeDoctor, ModeRebinder, ModeWrapRebinder)
 	}
 }
 
@@ -487,6 +497,40 @@ func runRebinder(ctx context.Context) error {
 	defer cli.Close()
 
 	w := rebinder.New(cli, cfg)
+	return w.Run(ctx)
+}
+
+// runWrapRebinder runs the F-49 wrap-anchor netns-target auto-rebind
+// sidecar. Auto-discovers wrap-anchors in its own compose project by
+// scanning siblings for `network_mode: container:<X>` and restarts
+// each one whenever its target container is recreated under the same
+// name. See SPEC-WRAP-REBINDER-DRAFT.md.
+func runWrapRebinder(ctx context.Context) error {
+	cfg, err := config.LoadWrapRebinder()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	setupLogger(cfg.LogLevel)
+
+	// Health/metrics share the listener pattern of the other modes.
+	// /readyz here is a pure liveness echo — there's no equivalent of
+	// "first reconcile complete" to gate on, and the bootstrap pool
+	// enumeration is best-effort (an empty pool is valid).
+	startMetrics(ctx, cfg.MetricsAddr, map[string]http.Handler{
+		"/healthz": health.LivenessHandler(),
+		"/readyz":  health.LivenessHandler(),
+	})
+
+	cli, err := client.NewClientWithOpts(
+		client.WithHost(cfg.DockerHost),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer cli.Close()
+
+	w := wraprebinder.New(cli, cfg)
 	return w.Run(ctx)
 }
 

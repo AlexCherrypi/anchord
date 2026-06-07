@@ -309,6 +309,39 @@ type Rebinder struct {
 	MetricsAddr string
 }
 
+// WrapRebinder holds resolved settings for the wrap-rebinder mode
+// (F-49). A wrap-rebinder sidecar lives in a wrap-stack and restarts
+// its sibling wrap-anchors (containers with
+// `network_mode: container:<X>`) every time the target referenced by
+// `<X>` is recreated under the same name. See
+// SPEC-WRAP-REBINDER-DRAFT.md.
+type WrapRebinder struct {
+	// SelfProject is the compose project the sidecar itself belongs
+	// to. Required. Read from COMPOSE_PROJECT_NAME (set automatically
+	// by Compose). The sidecar scans this project for siblings with
+	// container-mode netmode and builds its target pool from them.
+	SelfProject string
+
+	// PollInterval is the safety-net resync cadence on top of the
+	// docker event stream. Catches missed events during sidecar
+	// restarts / socket flaps. Default 30s.
+	PollInterval time.Duration
+
+	// RestartTimeout is the per-anchor stop-timeout passed to
+	// `docker restart`. Default 10s.
+	RestartTimeout time.Duration
+
+	// DockerHost is the docker API endpoint. Default unix socket.
+	DockerHost string
+
+	// LogLevel: debug, info, warn, error.
+	LogLevel string
+
+	// MetricsAddr is the listen address for the Prometheus metrics
+	// endpoint. Default 127.0.0.1:9090. Empty disables the listener.
+	MetricsAddr string
+}
+
 // ServiceAnchor holds resolved settings for the service-anchor mode.
 type ServiceAnchor struct {
 	// GatewayHostname is the Docker-DNS name to look up for the
@@ -483,6 +516,36 @@ func LoadRebinder() (*Rebinder, error) {
 	}
 	if c.EventBackoff < 0 {
 		return nil, fmt.Errorf("ANCHORD_FOLLOW_EVENT_BACKOFF must be non-negative")
+	}
+	return c, nil
+}
+
+// LoadWrapRebinder reads wrap-rebinder configuration from the
+// environment. See SPEC-WRAP-REBINDER-DRAFT.md.
+func LoadWrapRebinder() (*WrapRebinder, error) {
+	c := &WrapRebinder{
+		SelfProject: strings.TrimSpace(os.Getenv("COMPOSE_PROJECT_NAME")),
+		DockerHost:  getenvDefault("DOCKER_HOST", "unix:///var/run/docker.sock"),
+		LogLevel:    getenvDefault("ANCHORD_LOG_LEVEL", "info"),
+		MetricsAddr: metricsAddrFromEnv(),
+	}
+	if c.SelfProject == "" {
+		return nil, fmt.Errorf("COMPOSE_PROJECT_NAME must be set in wrap-rebinder mode (the sidecar scopes auto-discovery to its own project)")
+	}
+	var err error
+	c.PollInterval, err = parseDuration("ANCHORD_WRAP_POLL_INTERVAL", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if c.PollInterval <= 0 {
+		return nil, fmt.Errorf("ANCHORD_WRAP_POLL_INTERVAL must be positive")
+	}
+	c.RestartTimeout, err = parseDuration("ANCHORD_WRAP_RESTART_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if c.RestartTimeout <= 0 {
+		return nil, fmt.Errorf("ANCHORD_WRAP_RESTART_TIMEOUT must be positive")
 	}
 	return c, nil
 }
