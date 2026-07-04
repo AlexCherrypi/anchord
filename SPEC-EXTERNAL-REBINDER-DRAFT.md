@@ -312,3 +312,128 @@ Implementation estimate: 200–300 LOC plus tests.
 - Tests: full unit coverage with fake ops; integration smoke
   documented but not automated for v1 (would need privileged Docker
   in CI; deferred).
+
+## F-48.1 — Release-before-recreate & settle-before-reattach (2026-07-04)
+
+> **Status:** Implemented. The v1 F-48 behaviour ("reattach on every
+> `network create`") turned out to have two failure modes that, on
+> 2026-07-04, combined into a 7.5h Mailcow outage. Both are fixed in
+> `internal/rebinder` without any change to the deployment shape or the
+> `ANCHORD_FOLLOW_*` env surface. Adopters pick up the fix by bumping
+> the image; no config change is required.
+
+### The two failure modes
+
+1. **Endpoint-pin deadlock.** Keeping the follower pinned to the target
+   network blocks the *target stack's own* `compose down/up`. Docker
+   refuses to remove a network that still has active endpoints
+   (`network <name> has active endpoints (name:"<follower>")`), so the
+   entire target `up` aborts — even though the follower belongs to a
+   different compose project. Critically, a **failed** `network rm`
+   emits **no** `destroy` event, so the rebinder cannot wait for one to
+   know it should let go.
+
+2. **Reattach race.** Reattaching ~1s after the `create` event — while
+   compose is still assigning (partly static) IPs to the target's core
+   containers — collides the follower's dynamic IPAM lease with a later
+   static assignment. Docker surfaces this as `failed to set up
+   container networking: Address already in use`, again aborting the
+   target `up`. (Observed 2026-06-08 and 2026-07-04; same signature.)
+
+### Behaviour (additions to the v1 event handling)
+
+- **On `network disconnect` for our network (release-before-recreate).**
+  Re-inspect the target network's endpoint set. If the follower is the
+  **sole remaining endpoint** (every other/foreign endpoint has left),
+  proactively `disconnect` the follower ("park") so the target's
+  `network rm` can proceed. A network whose only member is the follower
+  has nothing for the follower to talk to, so parking costs no real
+  connectivity — and *holding on is exactly what deadlocked the target's
+  `up`*. If foreign endpoints remain, stay attached. The trigger is the
+  disconnect event, which fires **before** the target's `network rm`
+  attempt (per-container removal disconnects fire first) — precisely the
+  window a failed `network rm`'s missing `destroy` event denies us.
+
+- **On `network create` for our network (settle-before-reattach).** Do
+  not reattach immediately. Wait for the target stack to *settle*: after
+  the existing `ANCHORD_FOLLOW_EVENT_BACKOFF` floor grace, poll the
+  network's foreign-endpoint count until it has been **non-zero and
+  unchanged** for a quiet window (default 3s), capped at a max wait
+  (default 90s, after which reattach proceeds anyway). Only then
+  reattach. This lets compose finish assigning its (static) IPs before
+  the follower requests its dynamic one.
+
+- **On `network connect` while parked.** A foreign container reappearing
+  on the network means the target is returning on the **same** network
+  (a `--force-recreate` of containers without recreating the network, so
+  no `destroy`/`create` pair). Trigger the same settle-then-reattach
+  path. A connect while *attached* stays log-only (it is typically our
+  own reattach echoing back).
+
+- **On `network destroy`.** Mark the follower released (it usually
+  already parked before this fired) and wait for the paired `create`.
+
+- **Collision-resistant connect.** The reattach's `NetworkConnect`
+  retries with backoff (reusing `ANCHORD_FOLLOW_EVENT_BACKOFF`) on an
+  `Address already in use` error, up to 4 attempts, re-resolving the
+  live network ID between tries. Settle removes almost all of the race;
+  this is the backstop for the residual window.
+
+### Why generic, not Mailcow-specific
+
+Both decisions key **only** on observable network state — "is the
+follower the sole endpoint" and "has the foreign-endpoint count stopped
+changing" — never on the target stack's compose-project name or any
+Mailcow-specific knowledge. Every `follow_network` adopter benefits
+identically.
+
+### Deterministic-IP was considered and rejected
+
+Pinning the follower to its last-known IP (and re-requesting it on
+reattach) was evaluated as a race fix. Rejected: the follower's address
+has always been a **dynamic** IPAM lease, and compose owns the network's
+**static** allocations. Re-requesting a remembered address would fight
+compose's IPAM directly — it could collide with a static the target now
+assigns to that address, or with another dynamic guest. Waiting for
+quiescence and retrying on collision keeps the follower a well-behaved
+dynamic guest that never contends for compose's reserved addresses.
+
+### Settle tunables
+
+`settlePollInterval` (1s), `settleQuietWindow` (3s), `settleMaxWait`
+(90s), and connect attempts (4) are package constants, not env vars —
+unset "just works", so operators change nothing. The floor grace before
+the first probe reuses the existing `ANCHORD_FOLLOW_EVENT_BACKOFF`. If a
+production stack ever needs a longer/shorter window, promote these to
+`ANCHORD_FOLLOW_SETTLE_*` env vars in a follow-up (config-surface change
+→ operator sign-off).
+
+### Event-loop invariant (unchanged, reaffirmed)
+
+The Docker event subscription is opened exactly once per `Run` outer-loop
+iteration and **never** from inside the message loop; a terminal stream
+error returns control to `Run`, which is the only place that
+re-subscribes. The settle wait blocks *inside* `consume` (bounded by
+`settleMaxWait`, back-pressuring — never dropping — queued events), so it
+does not re-open the stream. Re-opening `Events` mid-loop is a known leak
+pattern and stays out.
+
+### Acceptance tests (added)
+
+**Unit** (`internal/rebinder/rebinder_test.go`):
+- `maybePark`: releases on sole-remaining-endpoint; holds when foreign
+  endpoints remain; marks parked when the follower is already gone;
+  no-ops when already parked; no action when membership is unreadable.
+- `consume`: disconnect parks a sole follower; connect-while-parked
+  drives reattach; connect-while-attached is inert; destroy marks parked.
+- `waitForSettle`: Ready on stable non-zero endpoints; TimedOut on an
+  empty set; Aborted when the network goes unreadable; Cancelled on ctx.
+- `connectWithRetry`: recovers after transient `Address already in use`;
+  gives up after the attempt cap; `isAddressInUse` classification.
+
+**Integration** (`rebinder_integration_test.go`, `-tags=integration`,
+green against a real daemon):
+- `NetworkInspectByName` populates `Members`.
+- Park releases the sole follower and the network becomes removable.
+- Park holds while a foreign endpoint remains.
+- `waitForSettle` reports Ready off real endpoint state.

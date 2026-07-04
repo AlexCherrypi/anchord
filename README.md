@@ -232,7 +232,12 @@ process:
   in a follower stack that re-attaches one of its containers to a target
   bridge network every time that network's Docker ID changes. Closes the
   failure class "my peer stack ran `compose down/up` and now my
-  `external: true` attachment points at a stale network ID."
+  `external: true` attachment points at a stale network ID." It also stays
+  out of the target's way during that recreate (F-48.1): it *releases*
+  the follower the moment it becomes the network's sole endpoint — so the
+  target's own `network rm` isn't blocked — and waits for the target stack
+  to settle before reattaching, so the follower's dynamic IP never races
+  the target's static assignments. No config change over plain F-48.
   Spec: [SPEC-EXTERNAL-REBINDER-DRAFT.md](SPEC-EXTERNAL-REBINDER-DRAFT.md).
 - **Wrap-rebinder** (`ANCHORD_MODE=wrap-rebinder`, F-49). Sidecar in a
   wrap-stack that recreates its sibling wrap-anchors whenever their
