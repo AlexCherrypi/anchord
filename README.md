@@ -546,8 +546,8 @@ here. The release pipeline rejects any tag whose recorded hash does
 not match the current source, so this block is the project's
 release-readiness signal.
 
-- **Last verified:** 2026-06-07T18:08:38Z
-- **Code hash:** `sha256:53620e57c9671d826f74428ee1bbee41a5a44d64eafafcb0bef01c8056e7eb4a`
+- **Last verified:** 2026-07-04T10:40:49Z
+- **Code hash:** `sha256:5f808098ac58d2bcc61af6cec82a92c1caac2d7c6409ea51936e0c47036521c8`
 - **Flood-fix flag:** `E2E_BRIDGE_FLOOD_FIX=1`
 
 ### Summary
@@ -555,12 +555,12 @@ release-readiness signal.
 | Suite | Pass | Fail | Skip | Total |
 |---|---:|---:|---:|---:|
 | `go vet ./...` | clean | — | — | — |
-| Go unit tests | 394 | 0 | 0 | 394 |
+| Go unit tests | 412 | 0 | 0 | 412 |
 | E2E (test/e2e, 5 scenarios) | 74 | 0 | — | 74 |
-| **All tests** | **468** | **0** | **0** | **468** |
+| **All tests** | **486** | **0** | **0** | **486** |
 
 <details>
-<summary>Go unit tests &mdash; 394/394 passed</summary>
+<summary>Go unit tests &mdash; 412/412 passed</summary>
 
 | Package | Test | Status |
 |---|---|:---:|
@@ -866,7 +866,13 @@ release-readiness signal.
 | `internal/rebinder` | `TestBootstrapRecheck_FollowerNotFound_DoesNotPanic` | ✓ |
 | `internal/rebinder` | `TestBootstrapRecheck_NetworkInspectError_DoesNotPanic` | ✓ |
 | `internal/rebinder` | `TestBootstrapRecheck_NoDivergence_NoReattach` | ✓ |
+| `internal/rebinder` | `TestConnectWithRetry_GivesUpAfterAttempts` | ✓ |
+| `internal/rebinder` | `TestConnectWithRetry_RecoversAfterAddressInUse` | ✓ |
+| `internal/rebinder` | `TestConsume_ConnectWhileAttached_NoAction` | ✓ |
+| `internal/rebinder` | `TestConsume_ConnectWhileParked_TriggersReattach` | ✓ |
 | `internal/rebinder` | `TestConsume_DestroyIsLogOnly` | ✓ |
+| `internal/rebinder` | `TestConsume_DestroyMarksParked` | ✓ |
+| `internal/rebinder` | `TestConsume_DisconnectParksSoleFollower` | ✓ |
 | `internal/rebinder` | `TestConsume_DispatchesCreateToReattach` | ✓ |
 | `internal/rebinder` | `TestConsume_IgnoresUnrelatedNetwork` | ✓ |
 | `internal/rebinder` | `TestConsume_ReturnsOnErrChannel` | ✓ |
@@ -874,10 +880,18 @@ release-readiness signal.
 | `internal/rebinder` | `TestConsume_ReturnsOnMsgChannelClosed` | ✓ |
 | `internal/rebinder` | `TestCtxSleep_CancelsEarly` | ✓ |
 | `internal/rebinder` | `TestCtxSleep_ZeroDuration` | ✓ |
+| `internal/rebinder` | `TestIDMatch` | ✓ |
+| `internal/rebinder` | `TestIsAddressInUse` | ✓ |
 | `internal/rebinder` | `TestIsAlreadyConnected` | ✓ |
 | `internal/rebinder` | `TestIsAlreadyNotAttached` | ✓ |
+| `internal/rebinder` | `TestMaybePark_AlreadyParked_NoOp` | ✓ |
+| `internal/rebinder` | `TestMaybePark_FollowerAlreadyGone_MarksParked` | ✓ |
+| `internal/rebinder` | `TestMaybePark_ForeignEndpointsPresent_StaysAttached` | ✓ |
+| `internal/rebinder` | `TestMaybePark_InspectFails_NoActionNoPanic` | ✓ |
+| `internal/rebinder` | `TestMaybePark_SoleEndpoint_ReleasesFollower` | ✓ |
 | `internal/rebinder` | `TestReattach_AlreadyConnected_TreatedAsSuccess` | ✓ |
 | `internal/rebinder` | `TestReattach_CallOrder` | ✓ |
+| `internal/rebinder` | `TestReattach_ClearsParkedOnSuccess` | ✓ |
 | `internal/rebinder` | `TestReattach_ConnectFailureSkipsRestart` | ✓ |
 | `internal/rebinder` | `TestReattach_FollowerNotFound_NoConnect` | ✓ |
 | `internal/rebinder` | `TestReattach_NotAttached_DisconnectAbsorbed` | ✓ |
@@ -889,6 +903,10 @@ release-readiness signal.
 | `internal/rebinder` | `TestResolveFollower_NameFallback` | ✓ |
 | `internal/rebinder` | `TestResolveFollower_NotFound` | ✓ |
 | `internal/rebinder` | `TestRun_ExitsOnContextCancel` | ✓ |
+| `internal/rebinder` | `TestWaitForSettle_ContextCancelled` | ✓ |
+| `internal/rebinder` | `TestWaitForSettle_NetworkUnreadable_Aborts` | ✓ |
+| `internal/rebinder` | `TestWaitForSettle_NoEndpoints_TimesOut` | ✓ |
+| `internal/rebinder` | `TestWaitForSettle_StableForeignEndpoints_Ready` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_DualStack` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_Empty` | ✓ |
 | `internal/reconciler` | `TestDesiredFromState_F46PortTranslation` | ✓ |
@@ -967,11 +985,11 @@ release-readiness signal.
 | Scenario | Assertion | Status |
 |---|---|:---:|
 | `v4-only` | anchord container running | ✓ |
-| `v4-only` | external iface attached on vlan subnet (resolved to eth0) | ✓ |
+| `v4-only` | external iface attached on vlan subnet (resolved to eth1) | ✓ |
 | `v4-only` | anchord log confirms F-37 network-based iface resolution | ✓ |
 | `v4-only` | nftables anchord_v4 table installed | ✓ |
 | `v4-only` | nftables anchord_v6 table installed | ✓ |
-| `v4-only` | eth0 has IPv4 from 10.99.0.0/24 | ✓ |
+| `v4-only` | eth1 has IPv4 from 10.99.0.0/24 | ✓ |
 | `v4-only` | anchord_v4 dnat_tcp contains port 25 | ✓ |
 | `v4-only` | S-2 (v4) source IP preserved through DNAT | ✓ |
 | `v4-only` | S-2 (v6) source IP preserved through DNAT | ✓ |
