@@ -315,3 +315,105 @@ func TestIntegration_BootstrapRecheck_NoDivergence(t *testing.T) {
 		t.Errorf("bootstrap recheck on healthy state must not change attachment; got %q want %q", got, netID)
 	}
 }
+
+// ---- release-before-recreate / settle (2026-07-04 fix) ---------------------
+
+// TestIntegration_MembersPopulated verifies the production adapter's
+// NetworkInspectByName reports the follower as a network Member — the
+// signal the park and settle logic key on.
+func TestIntegration_MembersPopulated(t *testing.T) {
+	cli := newCli(t)
+	netName := uniqueName(t, testNetPrefix)
+	createNetwork(t, cli, netName)
+	contName := uniqueName(t, testFollowerPx)
+	contID := createFollower(t, cli, netName, contName)
+
+	a := dockerAdapter{cli: cli}
+	info, err := a.NetworkInspectByName(context.Background(), netName)
+	if err != nil {
+		t.Fatalf("NetworkInspectByName: %v", err)
+	}
+	if _, ok := info.Members[contID]; !ok {
+		t.Errorf("Members = %v; expected an entry for follower %q", info.Members, contID)
+	}
+}
+
+// TestIntegration_ParkReleasesSoleFollower is the release-before-recreate
+// headline: with the follower the sole endpoint on the network, a
+// disconnect event must drive a proactive release so the target stack's
+// `network rm` can proceed. We prove it by asserting the network becomes
+// removable (no active endpoints) after maybePark.
+func TestIntegration_ParkReleasesSoleFollower(t *testing.T) {
+	cli := newCli(t)
+	netName := uniqueName(t, testNetPrefix)
+	netID := createNetwork(t, cli, netName)
+	contName := uniqueName(t, testFollowerPx)
+	contID := createFollower(t, cli, netName, contName)
+
+	// Sanity: the follower is the sole endpoint, so a NetworkRemove would
+	// fail right now with "has active endpoints".
+	if err := cli.NetworkRemove(context.Background(), netID); err == nil {
+		t.Fatal("expected NetworkRemove to fail while follower is attached")
+	}
+
+	w := New(cli, &config.Rebinder{FollowNetwork: netName, FollowTarget: contName})
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: netName, ContainerID: "some-departing-core"})
+
+	if !w.parked {
+		t.Errorf("expected parked=true after sole-endpoint release")
+	}
+	if got := readAttachedNetworkID(t, cli, contID, netName); got != "" {
+		t.Errorf("follower should be detached after park, still attached to %q", got)
+	}
+	// The network must now be removable — the whole point of the release.
+	if err := cli.NetworkRemove(context.Background(), netID); err != nil {
+		t.Errorf("network should be removable after park, got: %v", err)
+	}
+}
+
+// TestIntegration_ParkHoldsWhenForeignEndpointsRemain verifies the guard:
+// with another (foreign) container still attached, the follower must NOT
+// be released — releasing early would drop a live path.
+func TestIntegration_ParkHoldsWhenForeignEndpointsRemain(t *testing.T) {
+	cli := newCli(t)
+	netName := uniqueName(t, testNetPrefix)
+	createNetwork(t, cli, netName)
+	followerName := uniqueName(t, testFollowerPx)
+	followerID := createFollower(t, cli, netName, followerName)
+	// A second, foreign container sharing the network.
+	coreName := uniqueName(t, testFollowerPx+"core-")
+	createFollower(t, cli, netName, coreName)
+
+	w := New(cli, &config.Rebinder{FollowNetwork: netName, FollowTarget: followerName})
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: netName})
+
+	if w.parked {
+		t.Errorf("must not park while a foreign endpoint remains")
+	}
+	if got := readAttachedNetworkID(t, cli, followerID, netName); got == "" {
+		t.Errorf("follower must stay attached while foreign endpoints remain")
+	}
+}
+
+// TestIntegration_SettleReadyWithStableEndpoint proves the settle loop
+// reads real endpoint state through the production adapter and reports
+// Ready once a foreign endpoint is present and stable. Uses the in-package
+// test seam for fast timings so the loop resolves against the live daemon
+// without real second-scale sleeps.
+func TestIntegration_SettleReadyWithStableEndpoint(t *testing.T) {
+	cli := newCli(t)
+	netName := uniqueName(t, testNetPrefix)
+	createNetwork(t, cli, netName)
+	coreName := uniqueName(t, testFollowerPx+"core-")
+	createFollower(t, cli, netName, coreName)
+
+	// FollowTarget names a follower that does not exist, so the single
+	// live container counts as a foreign (target-owned) endpoint.
+	w := newWithOps(dockerAdapter{cli: cli}, &config.Rebinder{
+		FollowNetwork: netName,
+		FollowTarget:  "no-such-follower",
+	})
+	if got := w.waitForSettle(context.Background()); got != settleReady {
+		t.Errorf("waitForSettle with a stable foreign endpoint = %v, want settleReady", got)
+	}
+}

@@ -128,10 +128,18 @@ type fakeOps struct {
 	msgsCh chan EventMsg
 	errsCh chan error
 
+	// connectFailFirst makes the first N NetworkConnect calls return an
+	// "Address already in use" error, after which they succeed. Models
+	// the REATTACH-RACE where a still-churning target `up` transiently
+	// owns the address IPAM would hand the follower.
+	connectFailFirst int
+	connectCalls     int
+
 	// Recorded calls.
-	calls       []string
-	connectedID string
-	restartedID string
+	calls        []string
+	connectedID  string
+	restartedID  string
+	disconnected []string
 }
 
 func newFakeOps() *fakeOps {
@@ -186,6 +194,13 @@ func (f *fakeOps) ContainerInspect(ctx context.Context, idOrName string) (Contai
 
 func (f *fakeOps) NetworkConnect(ctx context.Context, networkID, containerID string) error {
 	f.record("NetworkConnect:" + networkID + "/" + containerID)
+	f.mu.Lock()
+	f.connectCalls++
+	n := f.connectCalls
+	f.mu.Unlock()
+	if f.connectFailFirst > 0 && n <= f.connectFailFirst {
+		return errors.New("Error response from daemon: failed to set up container networking: Address already in use")
+	}
 	if f.connectErr != nil {
 		return f.connectErr
 	}
@@ -197,6 +212,9 @@ func (f *fakeOps) NetworkConnect(ctx context.Context, networkID, containerID str
 
 func (f *fakeOps) NetworkDisconnect(ctx context.Context, networkName, containerID string) error {
 	f.record("NetworkDisconnect:" + networkName + "/" + containerID)
+	f.mu.Lock()
+	f.disconnected = append(f.disconnected, containerID)
+	f.mu.Unlock()
 	return f.disconnErr
 }
 
@@ -698,5 +716,326 @@ func TestRun_ExitsOnContextCancel(t *testing.T) {
 			t.Fatal("Run did not return after context cancel")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// ---- idMatch / isAddressInUse ---------------------------------------------
+
+func TestIDMatch(t *testing.T) {
+	full := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{full, full, true},                         // exact
+		{full, full[:12], true},                    // full vs short-id prefix
+		{full[:12], full, true},                    // short-id vs full
+		{full, "abcdef0123456789different", false}, // divergent
+		{"", full, false},                          // empty never matches
+		{full, "", false},
+		{"abc", "abcdef", false}, // too short to treat as a short-id prefix
+	}
+	for _, c := range cases {
+		if got := idMatch(c.a, c.b); got != c.want {
+			t.Errorf("idMatch(%q,%q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestIsAddressInUse(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{errors.New("Error response from daemon: failed to set up container networking: Address already in use"), true},
+		{errors.New("address is in use"), true},
+		{errors.New("no available IPv4 addresses on this network's address pools"), true},
+		{errors.New("endpoint with name foo already exists"), false},
+		{errors.New("some unrelated error"), false},
+	}
+	for _, c := range cases {
+		if got := isAddressInUse(c.err); got != c.want {
+			t.Errorf("isAddressInUse(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
+// ---- release-before-recreate (maybePark) ----------------------------------
+
+// followerOnly builds an ops whose target network's only member is the
+// follower — the sole-remaining-endpoint condition that must trigger a
+// proactive release so the target's `network rm` can proceed.
+func parkOps(members map[string]string) *fakeOps {
+	ops := newFakeOps()
+	ops.containers = []ContainerInfo{
+		{
+			ID:    "follower-id",
+			Names: []string{"/follower"},
+			Labels: map[string]string{
+				"com.docker.compose.project": "self",
+				"com.docker.compose.service": "sync",
+			},
+		},
+	}
+	ops.netByName["mailcow_net"] = NetworkInfo{
+		ID:      "net-id",
+		Name:    "mailcow_net",
+		Members: members,
+	}
+	return ops
+}
+
+func parkWatcher(ops *fakeOps) *Watcher {
+	return newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "sync",
+		SelfProject:   "self",
+	})
+}
+
+func TestMaybePark_SoleEndpoint_ReleasesFollower(t *testing.T) {
+	// Only the follower remains attached → release it.
+	ops := parkOps(map[string]string{"follower-id": "follower"})
+	w := parkWatcher(ops)
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: "mailcow_net", ContainerID: "some-core"})
+
+	if !w.parked {
+		t.Errorf("expected parked=true after sole-endpoint release")
+	}
+	found := false
+	for _, id := range ops.disconnected {
+		if id == "follower-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected follower disconnect, got disconnects %v", ops.disconnected)
+	}
+}
+
+func TestMaybePark_ForeignEndpointsPresent_StaysAttached(t *testing.T) {
+	// The target still has its own endpoints besides the follower → hold.
+	ops := parkOps(map[string]string{
+		"follower-id": "follower",
+		"core-1":      "nginx-mailcow",
+	})
+	w := parkWatcher(ops)
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: "mailcow_net", ContainerID: "core-2"})
+
+	if w.parked {
+		t.Errorf("must NOT park while target still has foreign endpoints")
+	}
+	if len(ops.disconnected) != 0 {
+		t.Errorf("must not disconnect follower while target endpoints remain, got %v", ops.disconnected)
+	}
+}
+
+func TestMaybePark_FollowerAlreadyGone_MarksParked(t *testing.T) {
+	// Follower already off the net (someone detached it) → record parked,
+	// but don't issue a redundant disconnect.
+	ops := parkOps(map[string]string{"core-1": "nginx-mailcow"})
+	w := parkWatcher(ops)
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: "mailcow_net", ContainerID: "follower-id"})
+
+	if !w.parked {
+		t.Errorf("expected parked=true when follower already detached")
+	}
+	if len(ops.disconnected) != 0 {
+		t.Errorf("should not disconnect an already-detached follower, got %v", ops.disconnected)
+	}
+}
+
+func TestMaybePark_AlreadyParked_NoOp(t *testing.T) {
+	ops := parkOps(map[string]string{"follower-id": "follower"})
+	w := parkWatcher(ops)
+	w.parked = true
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: "mailcow_net"})
+	if len(ops.disconnected) != 0 {
+		t.Errorf("already-parked must be a no-op, got disconnects %v", ops.disconnected)
+	}
+}
+
+func TestMaybePark_InspectFails_NoActionNoPanic(t *testing.T) {
+	ops := parkOps(map[string]string{"follower-id": "follower"})
+	ops.netErr = errors.New("daemon unreachable")
+	w := parkWatcher(ops)
+	w.maybePark(context.Background(), EventMsg{Action: "disconnect", Name: "mailcow_net"})
+	if w.parked || len(ops.disconnected) != 0 {
+		t.Errorf("must take no action when membership is unreadable")
+	}
+}
+
+// ---- consume: disconnect drives park; connect-while-parked re-settles ------
+
+func TestConsume_DisconnectParksSoleFollower(t *testing.T) {
+	ops := parkOps(map[string]string{"follower-id": "follower"})
+	w := parkWatcher(ops)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		ops.msgsCh <- EventMsg{Action: "disconnect", Name: "mailcow_net", ContainerID: "core-last"}
+		time.Sleep(20 * time.Millisecond)
+		close(ops.msgsCh)
+	}()
+	_ = w.consume(ctx, ops.msgsCh, ops.errsCh)
+
+	if !w.parked {
+		t.Errorf("disconnect that leaves follower sole endpoint must park")
+	}
+}
+
+func TestConsume_ConnectWhileParked_TriggersReattach(t *testing.T) {
+	// After parking, a foreign container reappearing on the network (target
+	// coming back on the SAME network, no recreate) must drive settle+reattach.
+	ops := parkOps(map[string]string{"core-1": "nginx-mailcow", "core-2": "postfix-mailcow"})
+	w := parkWatcher(ops)
+	w.parked = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		ops.msgsCh <- EventMsg{Action: "connect", Name: "mailcow_net", ContainerID: "core-1"}
+		time.Sleep(20 * time.Millisecond)
+		close(ops.msgsCh)
+	}()
+	_ = w.consume(ctx, ops.msgsCh, ops.errsCh)
+
+	if ops.connectedID != "net-id" {
+		t.Errorf("connect-while-parked must reattach follower to net-id, got %q", ops.connectedID)
+	}
+	if w.parked {
+		t.Errorf("successful reattach must clear parked")
+	}
+}
+
+func TestConsume_ConnectWhileAttached_NoAction(t *testing.T) {
+	ops := parkOps(map[string]string{"follower-id": "follower", "core-1": "nginx"})
+	w := parkWatcher(ops) // parked defaults false
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		ops.msgsCh <- EventMsg{Action: "connect", Name: "mailcow_net", ContainerID: "core-1"}
+		time.Sleep(20 * time.Millisecond)
+		close(ops.msgsCh)
+	}()
+	_ = w.consume(ctx, ops.msgsCh, ops.errsCh)
+
+	if ops.connectedID != "" {
+		t.Errorf("connect while attached must not reattach, got %q", ops.connectedID)
+	}
+}
+
+func TestConsume_DestroyMarksParked(t *testing.T) {
+	ops := parkOps(map[string]string{"follower-id": "follower"})
+	w := parkWatcher(ops)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		ops.msgsCh <- EventMsg{Action: "destroy", Name: "mailcow_net"}
+		time.Sleep(20 * time.Millisecond)
+		close(ops.msgsCh)
+	}()
+	_ = w.consume(ctx, ops.msgsCh, ops.errsCh)
+
+	if !w.parked {
+		t.Errorf("destroy of the target network must mark the follower released (parked)")
+	}
+}
+
+// ---- waitForSettle ---------------------------------------------------------
+
+func settleWatcher(ops *fakeOps) *Watcher {
+	return newWithOps(ops, &config.Rebinder{
+		FollowNetwork: "mailcow_net",
+		FollowTarget:  "sync",
+		SelfProject:   "self",
+	})
+}
+
+func TestWaitForSettle_StableForeignEndpoints_Ready(t *testing.T) {
+	ops := parkOps(map[string]string{"core-1": "nginx", "core-2": "postfix"})
+	w := settleWatcher(ops)
+	if got := w.waitForSettle(context.Background()); got != settleReady {
+		t.Errorf("stable non-zero endpoints must settle Ready, got %v", got)
+	}
+}
+
+func TestWaitForSettle_NoEndpoints_TimesOut(t *testing.T) {
+	// Network never gains a foreign endpoint → we time out (and the caller
+	// reattaches anyway, backed by the connect-retry).
+	ops := parkOps(map[string]string{}) // empty members
+	w := settleWatcher(ops)
+	if got := w.waitForSettle(context.Background()); got != settleTimedOut {
+		t.Errorf("empty endpoint set must settle TimedOut, got %v", got)
+	}
+}
+
+func TestWaitForSettle_NetworkUnreadable_Aborts(t *testing.T) {
+	ops := parkOps(map[string]string{"core-1": "nginx"})
+	ops.netErr = errors.New("network gone mid-settle")
+	w := settleWatcher(ops)
+	if got := w.waitForSettle(context.Background()); got != settleAborted {
+		t.Errorf("unreadable network must settle Aborted, got %v", got)
+	}
+}
+
+func TestWaitForSettle_ContextCancelled(t *testing.T) {
+	ops := parkOps(map[string]string{}) // never ready
+	w := settleWatcher(ops)
+	w.cfg.EventBackoff = time.Second // force the backoff branch to observe cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := w.waitForSettle(ctx); got != settleCancelled {
+		t.Errorf("cancelled context must settle Cancelled, got %v", got)
+	}
+}
+
+// ---- connectWithRetry ------------------------------------------------------
+
+func TestConnectWithRetry_RecoversAfterAddressInUse(t *testing.T) {
+	ops := newFakeOps()
+	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id", Name: "mailcow_net"}
+	ops.containers = []ContainerInfo{{ID: "follower-id", Names: []string{"/follower"}}}
+	ops.connectFailFirst = 2 // fail twice, succeed on the 3rd (== connectAttempts)
+	w := newWithOps(ops, &config.Rebinder{FollowNetwork: "mailcow_net", FollowTarget: "follower"})
+
+	w.reattach(context.Background(), "test")
+	if ops.connectedID != "new-id" {
+		t.Errorf("reattach must recover after transient address-in-use, got %q", ops.connectedID)
+	}
+	if ops.connectCalls != 3 {
+		t.Errorf("expected 3 connect attempts, got %d", ops.connectCalls)
+	}
+}
+
+func TestConnectWithRetry_GivesUpAfterAttempts(t *testing.T) {
+	ops := newFakeOps()
+	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id", Name: "mailcow_net"}
+	ops.containers = []ContainerInfo{{ID: "follower-id", Names: []string{"/follower"}}}
+	ops.connectFailFirst = 99 // always fail with address-in-use
+	w := newWithOps(ops, &config.Rebinder{FollowNetwork: "mailcow_net", FollowTarget: "follower"})
+
+	w.reattach(context.Background(), "test")
+	if ops.connectedID != "" {
+		t.Errorf("reattach must not report success when every attempt collides")
+	}
+	if ops.connectCalls != w.connectAttempts {
+		t.Errorf("expected exactly %d connect attempts before giving up, got %d", w.connectAttempts, ops.connectCalls)
+	}
+}
+
+func TestReattach_ClearsParkedOnSuccess(t *testing.T) {
+	ops := newFakeOps()
+	ops.netByName["mailcow_net"] = NetworkInfo{ID: "new-id", Name: "mailcow_net"}
+	ops.containers = []ContainerInfo{{ID: "follower-id", Names: []string{"/follower"}}}
+	w := newWithOps(ops, &config.Rebinder{FollowNetwork: "mailcow_net", FollowTarget: "follower"})
+	w.parked = true
+	w.reattach(context.Background(), "test")
+	if w.parked {
+		t.Errorf("a successful reattach must clear parked")
 	}
 }
